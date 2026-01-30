@@ -194,14 +194,14 @@ If you use ReCoN in your work, please cite:
 .. admonition:: Cite ReCoN
    :class: seealso
 
-   Trimbour R., Ramirez Flores R. O., Saez Rodriguez J., Cantini L. (2025). ReCoN: Reconstructing multicellular models by integrating gene regulatory and cell communication networks. *bioRxiv*. https://doi.org/___________
+   Trimbour R., Ramirez Flores R. O., Saez Rodriguez J., Cantini L. (2026). Modelling multicellular coordination by bridging cell-cell communication and intracellular regulation through multilayer networks. *bioRxiv*. https://doi.org/10.64898/2026.01.20.700561
 
 If you also use ReCoN to generate GRNs, please cite:
 
 .. admonition:: Cite HuMMuS
    :class: seealso
 
-   Trimbour R., Ramirez Flores R. O., Saez Rodriguez J., Cantini L. (2025). ReCoN: Reconstructing multicellular models by integrating gene regulatory and cell communication networks. *bioRxiv*. https://doi.org/___________
+   Trimbour R., Ramirez Flores R. O., Saez Rodriguez J., Cantini L. (2026). Modelling multicellular coordination by bridging cell-cell communication and intracellular regulation through multilayer networks. *bioRxiv*. https://doi.org/10.64898/2026.01.20.700561
   
    Trimbour R., Deutschmann I. M., Cantini L. (2024). HuMMuS: Inferring gene regulatory networks through heterogeneous multilayer networks. *Bioinformatics*, 40(3), btae143. https://doi.org/10.1093/bioinformatics/btae143
 

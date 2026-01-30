@@ -9,6 +9,9 @@ It combines both **gene regulatory networks** and **cell communication networks*
 ReCoN uses **heterogeneous multilayer networks** and integrates several layers of information into a **complex network**, ready to be explored and analyzed.  
 Both the GRNs and intercellular networks are inferred from **single-cell RNA-seq data** (and optionally **scATAC-seq**).
 
+You can check our preprint here for more details! 😊<br>
+https://doi.org/10.64898/2026.01.20.700561
+
 <p align="center">
   <img src="figures/recon_abstract_1.png" alt="ReCoN-abstract Remi-Trimbour 2025" width="600"/>
 </p>
@@ -84,7 +87,7 @@ The parameter `α ∈ [0, 1]` sets the weight of the **direct effect** (`α`) vs
 > **Why indirect effects matter**  
 > Neighboring cells can secrete ligands in response to a treatment, altering signaling in the focal cell.  
 > Our evaluation showed **indirect effect dominance** (`α = 0.8`) gave the best performance.  
-> *(Trimbour et al., 2025 — Immune Dictionary and Heart Failure showcases)*
+> *(in Trimbour et al., 2026 — Immune Dictionary and Heart Failure showcases)*
 
 ---
 
@@ -122,15 +125,15 @@ The multilayer (TFs, DNA regions, target genes) is then processed to infer the f
 
 If you use ReCoN, please cite:
 
-> Trimbour R., Ramirez Flores R. O., Saez Rodriguez J., Cantini L. (2025).  
-> **ReCoN: Reconstructing multicellular models by integrating gene regulatory and cell communication networks.**  
-> *bioRxiv*. https://doi.org/_________
+> Trimbour R., Ramirez Flores R. O., Saez Rodriguez J., Cantini L. (2026).  
+> **Modelling multicellular coordination by bridging cell-cell communication and intracellular regulation through multilayer networks.**  
+> *bioRxiv*. https://doi.org/10.64898/2026.01.20.700561
 
 If you also use ReCoN to generate GRNs, cite:
 
-> Trimbour R., Ramirez Flores R. O., Saez Rodriguez J., Cantini L. (2025).  
-> **ReCoN: Reconstructing multicellular models by integrating gene regulatory and cell communication networks.**  
-> *bioRxiv*. https://doi.org/_________  
+> Trimbour R., Ramirez Flores R. O., Saez Rodriguez J., Cantini L. (2026).  
+> **Modelling multicellular coordination by bridging cell-cell communication and intracellular regulation through multilayer networks.**  
+> *bioRxiv*. https://doi.org/10.64898/2026.01.20.700561  
 >
 > Trimbour R., Deutschmann I. M., Cantini L. (2024).  
 > **HuMMuS: Inferring gene regulatory networks through heterogeneous multilayer networks.**  
