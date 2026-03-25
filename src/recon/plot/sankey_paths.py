@@ -316,7 +316,8 @@ def get_top_tfs(
     results = results_df.sort_values(by="score", ascending=False)
     if results.empty:
         return results
-    results.loc[:, "celltype"] = results["multiplex"].str.rsplit("_", expand=True)[0]
+    # Strip the known suffix instead of splitting on "_"
+    results.loc[:, "celltype"] = results["multiplex"].str.replace(r"_(grn|receptor)$", "", regex=True)
     results = results[results["celltype"]==cell_type]
 
     results = results[results["node"].str.endswith(f"_TF::{cell_type}")]
@@ -355,7 +356,8 @@ def get_top_receptors(
     results = results_df.sort_values(by="score", ascending=False)
     if results.empty:
         return results
-    results.loc[:, "celltype"] = results.loc[:, "multiplex"].str.rsplit("_", expand=True)[0]
+    # Strip the known suffix instead of splitting on "_"
+    results.loc[:, "celltype"] = results["multiplex"].str.replace(r"_(grn|receptor)$", "", regex=True)
     results = results[results["celltype"]==cell_type]
     
     # remove fake node
