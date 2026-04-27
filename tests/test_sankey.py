@@ -245,6 +245,14 @@ class TestExtractPairFunctions:
 
 class TestBuildPartialNetworks:
     """Test build_partial_networks function."""
+
+    def test_seed_normalization_keeps_prefixed_seeds(self):
+        """Seeds that already include a cell type should not be suffixed again."""
+        seeds = pd.Index(['GENE1::CellA', 'GENE2'])
+
+        result = sankey_paths._normalize_seed_nodes(seeds, "CellA")
+
+        assert result.tolist() == ['GENE1::CellA', 'GENE2::CellA']
     
     def test_build_without_ligand_cells(self, simple_multicell_for_sankey, simple_results):
         """Test building partial networks without ligand cells (intracellular only)."""

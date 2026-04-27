@@ -6,7 +6,12 @@ Tests the receptor gene loading functionality.
 
 import pytest
 import pandas as pd
-from recon.data.load_data import load_receptor_genes, receptor_gene_resources, fetch_tutorial_data
+from recon.data.load_data import (
+    download_tutorial,
+    fetch_tutorial_data,
+    load_receptor_genes,
+    receptor_gene_resources,
+)
 import os
 
 
@@ -178,3 +183,50 @@ class TestFetchTutorialData:
 
         # Check if the file is not empty
         assert os.path.getsize(file_path) > 0
+
+    def test_download_tutorial_single_file(self, monkeypatch):
+        """Test download_tutorial delegates to single-file download."""
+        calls = {}
+
+        def fake_fetch(filename, data_dir="./data", force=False):
+            calls["filename"] = filename
+            calls["data_dir"] = data_dir
+            calls["force"] = force
+            return "/tmp/rna.h5ad"
+
+        monkeypatch.setattr(
+            "recon.data.load_data.fetch_tutorial_data",
+            fake_fetch
+        )
+
+        path = download_tutorial(
+            "perturbation_tuto/rna.h5ad",
+            data_dir="/tmp/data",
+            force=True
+        )
+
+        assert path == "/tmp/rna.h5ad"
+        assert calls == {
+            "filename": "perturbation_tuto/rna.h5ad",
+            "data_dir": "/tmp/data",
+            "force": True,
+        }
+
+    def test_download_tutorial_all_files(self, monkeypatch):
+        """Test download_tutorial delegates to all-file download."""
+        calls = {}
+
+        def fake_fetch_all(data_dir="./data/perturbation_tuto", force=False):
+            calls["data_dir"] = data_dir
+            calls["force"] = force
+            return {"file": "/tmp/file"}
+
+        monkeypatch.setattr(
+            "recon.data.load_data.fetch_all_tutorial_data",
+            fake_fetch_all
+        )
+
+        paths = download_tutorial(data_dir="/tmp/data", force=True)
+
+        assert paths == {"file": "/tmp/file"}
+        assert calls == {"data_dir": "/tmp/data", "force": True}

@@ -382,6 +382,90 @@ def get_top_receptors(
     return results.iloc[:n, :]
 
 
+def _seed_names_for_cell_type(seeds, cell_type: str) -> pd.Series:
+    """Return seed names in GENE::CellType form."""
+    seed_index = pd.Index(seeds.keys() if isinstance(seeds, dict) else seeds)
+    seed_values = seed_index.astype(str)
+    return pd.Series([
+        seed if "::" in seed else f"{seed}::{cell_type}"
+        for seed in seed_values
+    ])
+
+
+def get_top_genes(
+    results_df: pd.DataFrame,
+    cell_type,
+    n: int = 5,
+    exclude_nodes=None,
+) -> pd.DataFrame:
+    """
+    From a `results_df` of node-scores, identify top gene nodes for a cell type.
+
+    Gene nodes are plain ``GENE::CellType`` nodes in the GRN multiplex; TF and
+    receptor helper nodes keep their ``_TF``/``_receptor`` layer suffixes.
+    """
+    results = results_df.sort_values(by="score", ascending=False)
+    if results.empty:
+        return results
+
+    results = results.copy()
+    results.loc[:, "celltype"] = results["multiplex"].str.replace(r"_(grn|receptor)$", "", regex=True)
+    results = results[results["celltype"] == cell_type]
+    results = results[results["node"].str.endswith(f"::{cell_type}")]
+    results = results[
+        ~results["node"].str.contains(r"_(?:TF|receptor)::", regex=True)
+    ]
+
+    if exclude_nodes is not None:
+        results = results[~results["node"].isin(set(exclude_nodes))]
+
+    return results.iloc[:n, :]
+
+
+def _normalize_flow(flow: str) -> str:
+    flow = flow.lower()
+    if flow not in {"upstream", "downstream"}:
+        raise ValueError("flow must be 'upstream' or 'downstream'")
+    return flow
+
+
+def _append_missing_nodes(rows_df, nodes, cell_type, multiplex_suffix):
+    """Append placeholder result rows for direct topology hits missing from RWR ranks."""
+    existing = set(rows_df["node"]) if "node" in rows_df.columns else set()
+    missing = [node for node in nodes if node not in existing]
+    if not missing:
+        return rows_df
+
+    placeholders = pd.DataFrame({
+        "multiplex": f"{cell_type}_{multiplex_suffix}",
+        "node": missing,
+        "score": 0.0,
+    })
+    if rows_df.empty:
+        return placeholders
+    return pd.concat([rows_df, placeholders], ignore_index=True, sort=False)
+
+
+def _include_direct_seed_tfs(top_tfs, tf_gene_layer, seeds, cell_type):
+    direct_tfs = list(pd.unique(
+        tf_gene_layer.loc[tf_gene_layer["target"].isin(seeds), "source"]
+    ))
+    return _append_missing_nodes(top_tfs, direct_tfs, cell_type, "grn")
+
+
+def _include_direct_tf_receptors(top_receptors, receptor_tf_layer, top_tfs, cell_type):
+    tf_nodes = set(top_tfs["node"]) if "node" in top_tfs.columns else set()
+    tf_nodes_clean = {tf.replace("_TF::", "::") for tf in tf_nodes}
+    direct_receptors = list(pd.unique(
+        receptor_tf_layer.loc[
+            receptor_tf_layer["col1"].isin(tf_nodes) |
+            receptor_tf_layer["col1"].isin(tf_nodes_clean),
+            "col2"
+        ]
+    ))
+    return _append_missing_nodes(top_receptors, direct_receptors, cell_type, "receptor")
+
+
 def get_top_ligands(
     results_df: pd.DataFrame,
     receptor_ligand_df: pd.DataFrame,
@@ -529,7 +613,7 @@ def extract_gene_tf_pairs(
             gene ∈ seeds.
     """
 
-    genes_list = seeds.tolist()
+    genes_list = pd.Index(seeds).astype(str).tolist()
     tfs_list = list(top_tfs["node"].values)
 
     if verbose:
@@ -544,7 +628,7 @@ def extract_gene_tf_pairs(
         print(f"  Sample rows (first 3):")
         print(tf_gene_layer.head(3).to_string(index=False))
 
-    # FIXED: TFs are in source, genes are in target (biological direction)
+    # TFs are in source, regulated seed genes are in target.
     filtered_df = tf_gene_layer[
         tf_gene_layer["source"].isin(tfs_list) &
         tf_gene_layer["target"].isin(genes_list)
@@ -644,7 +728,10 @@ def extract_receptor_tf_pairs(
     # FIXED: col2=receptors, col1=genes/TFs (actual data structure!)
     filtered_df = receptor_gene_layer[
         receptor_gene_layer.loc[:, "col2"].isin(receptors_list) &
-        receptor_gene_layer.loc[:, "col1"].isin(tfs_list_clean)
+        (
+            receptor_gene_layer.loc[:, "col1"].isin(tfs_list_clean) |
+            receptor_gene_layer.loc[:, "col1"].isin(tfs_list)
+        )
     ].copy()
 
     if verbose:
@@ -803,7 +890,8 @@ def build_partial_networks(
     before_top_n: int = 5,
     per_celltype: bool = True,
     include_before_cells: bool = False,
-    verbose: bool = False
+    verbose: bool = False,
+    direction: str = "upstream"
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Construct partial or full network layers needed for Sankey plots.
@@ -820,6 +908,8 @@ def build_partial_networks(
       (before_receptor_tf_df, before_tf_ligand_df,
        receptor_ligand_df, receptor_tf_df, gene_tf_df)
     """
+    direction = _normalize_flow(direction)
+    seeds_prefixed = _seed_names_for_cell_type(seeds, cell_type)
     cc_df = get_cell_communication_layer(
         multicell_obj,
         as_dataframe=True,
@@ -829,13 +919,6 @@ def build_partial_networks(
     top_ligands = get_top_ligands(results, cc_df, n=top_ligand_n, per_celltype=per_celltype)
     top_receptors = get_top_receptors(results, cell_type=cell_type, n=top_receptor_n)
     top_tfs = get_top_tfs(results, cell_type=cell_type, n=top_tf_n)
-
-    receptor_ligand_top = extract_receptor_ligand_pairs(
-        receptor_ligand_df=cc_df,
-        top_ligands_df=top_ligands,
-        top_receptors_df=top_receptors,
-        verbose=verbose
-    )
 
     tf_gene_df = get_celltype_gene_layer(
         multicell_obj=multicell_obj,
@@ -850,8 +933,24 @@ def build_partial_networks(
         as_dataframe=True
     )
 
-    seeds_prefixed = _normalize_seed_nodes(seeds, cell_type)
-    gene_tf_pairs = extract_gene_tf_pairs(tf_gene_df, top_tfs, seeds_prefixed, verbose=verbose)
+    top_tfs = _include_direct_seed_tfs(top_tfs, tf_gene_df, seeds_prefixed, cell_type)
+    top_receptors = _include_direct_tf_receptors(
+        top_receptors, receptor_tf_df, top_tfs, cell_type
+    )
+
+    receptor_ligand_top = extract_receptor_ligand_pairs(
+        receptor_ligand_df=cc_df,
+        top_ligands_df=top_ligands,
+        top_receptors_df=top_receptors,
+        verbose=verbose
+    )
+
+    gene_tf_pairs = extract_gene_tf_pairs(
+        tf_gene_df,
+        top_tfs,
+        seeds_prefixed,
+        verbose=verbose,
+    )
     receptor_tf_pairs = extract_receptor_tf_pairs(receptor_tf_df, top_tfs, top_receptors, verbose=verbose)
 
     if not include_before_cells:
@@ -913,6 +1012,8 @@ def plot_3layer_sankey(
     color: str = "rgba(160, 160, 160, 0.4)",
     save_path=None
 ):
+    flow = _normalize_flow(flow)
+
     def format_links(df, source_col, target_col):
         return df.loc[:, [source_col, target_col, "weight"]].rename(columns={
             source_col: "source",
@@ -925,10 +1026,6 @@ def plot_3layer_sankey(
 
     r_t = r_t[r_t["target"].isin(t_g["source"])]
     t_g = t_g[t_g["source"].isin(r_t["target"])]
-
-    if flow.lower() == "downstream":
-        for df in [r_t, t_g]:
-            df[["source", "target"]] = df[["target", "source"]]
 
     r_t["color"] = color
     t_g["color"] = color
@@ -969,14 +1066,10 @@ def plot_3layer_sankey(
 
     title_text = (
         f"Top regulators in {cell_type}: Receptor → TF → Gene"
-        if flow.lower() == "upstream"
-        else f"Top regulators in {cell_type}: Gene → TF → Receptor"
+        if flow == "upstream"
+        else f"Top regulators of downstream genes in {cell_type}: Receptor → TF → Gene"
     )
-    layer_names = (
-        ["Receptors", "TFs", "Genes"]
-        if flow.lower() == "upstream"
-        else ["Genes", "TFs", "Receptors"]
-    )
+    layer_names = ["Receptors", "TFs", "Genes"]
     x_positions = [0.0, 0.5, 1.0]
 
     fig = go.Figure(data=[sankey_data])
@@ -1005,8 +1098,7 @@ def plot_4layer_sankey(
     save_path: Union[str, None] = None
 ):
     """
-    Plot a 4-layer Sankey diagram showing ligand → receptor → TF → gene
-    or the reverse flow.
+    Plot a 4-layer Sankey diagram showing ligand → receptor → TF → gene.
     
     Parameters
     ----------
@@ -1027,8 +1119,8 @@ def plot_4layer_sankey(
           - "gene"     (e.g. "JUN::Fibroblast")
           - "weight"   (numeric)
     flow : str, default="upstream"
-        If "upstream", plot ligand → receptor → TF → gene.
-        If "downstream", plot gene → TF → receptor → ligand.
+        Direction of the result scores. The diagram keeps the same
+        ligand → receptor → TF → gene layout for both directions.
     save_path : str or None, default=None
         If provided, save the figure as an HTML file to this path.
 
@@ -1036,6 +1128,8 @@ def plot_4layer_sankey(
     -------
     None
     """
+    flow = _normalize_flow(flow)
+
     def format_links(df, source_col, target_col):
         return df.loc[:, [source_col, target_col, "weight"]].rename(columns={
             source_col: "source",
@@ -1062,11 +1156,6 @@ def plot_4layer_sankey(
     l_r = l_r[l_r["target"].isin(r_t["source"])]
     r_t = r_t[r_t["source"].isin(l_r["target"])]
     t_g = t_g[t_g["source"].isin(r_t["target"])]
-
-    if flow.lower() == "downstream":
-        for df in [l_r, r_t, t_g]:
-            if len(df) > 0:
-                df[["source", "target"]] = df[["target", "source"]]
 
     # Only assign colors to non-empty DataFrames
     if len(l_r) > 0:
@@ -1120,14 +1209,10 @@ def plot_4layer_sankey(
     title_text = (
         #l_r["source"].str.extract(r"::(.+)$")[0].unique()
         f"Top regulators from other cell types:\n Ligand → Receptor → TF → Gene"
-        if flow.lower() == "upstream"
-        else f"Top regulators from other cell types:\n Gene → TF → Receptor → Ligand"
+        if flow == "upstream"
+        else f"Top regulators of downstream genes from other cell types:\n Ligand → Receptor → TF → Gene"
     )
-    layer_names = (
-        ["Ligands", "Receptors", "TFs", "Genes"]
-        if flow.lower() == "upstream"
-        else ["Genes", "TFs", "Receptors", "Ligands"]
-    )
+    layer_names = ["Ligands", "Receptors", "TFs", "Genes"]
     x_positions = [0.0, 0.33, 0.66, 1.0]
 
     fig = go.Figure(data=[sankey_data])
@@ -1180,6 +1265,8 @@ def plot_6layer_sankey(
     flow: str = "upstream",
     save_path: Union[str, None] = None
 ):
+    flow = _normalize_flow(flow)
+
     def format_links(df, source_col, target_col):
         return df.loc[:, [source_col, target_col, "weight"]].rename(columns={
             source_col: "source",
@@ -1211,10 +1298,6 @@ def plot_6layer_sankey(
     bt_l = bt_l[bt_l["source"].isin(br_bt["target"])]
     l_r = l_r[l_r["source"].isin(bt_l["target"])]
     br_bt = br_bt[br_bt["target"].isin(bt_l["source"])]
-
-    if flow.lower() == "downstream":
-        for df in [br_bt, bt_l, l_r, r_t, t_g]:
-            df.loc[:, ["source", "target"]] = df.loc[:, ["target", "source"]]
 
     # Assign colors by celltype
     def assign_group_colors(df, column):
@@ -1301,12 +1384,12 @@ def plot_6layer_sankey(
             xanchor="left"
         )
 
-    if flow.lower() == "upstream":
+    if flow == "upstream":
         title_text = "Upstream Receptor → Upstream TF → Ligand → Downstream Receptor → Downstream TF → Gene"
-        layer_names = ["Upstream Receptors", "Upstream TFs", "Ligands", "Receptors", "TFs", "Genes"]
+        layer_names = ["Sender Receptors", "Sender TFs", "Ligands", "Receiver Receptors", "Receiver TFs", "Genes"]
     else:
-        title_text = "Gene → First TF → First Receptor → Ligand → Upstream TF → Upstream Receptor"
-        layer_names = ["Genes", "TFs", "Receptors", "Ligands", "Upstream TFs", "Upstream Receptors"]
+        title_text = "Regulators of downstream genes: Upstream Receptor → Upstream TF → Ligand → Receiver Receptor → Receiver TF → Gene"
+        layer_names = ["Sender Receptors", "Sender TFs", "Ligands", "Receiver Receptors", "Receiver TFs", "Genes"]
 
     fig.update_layout(title_text=title_text, font_size=14, font_color="black")
 
@@ -1357,8 +1440,8 @@ def plot_intracell_sankey(
     top_tf_n : int, default=10
         Number of top transcription factors to include.
     flow : str, default="upstream"
-        If "upstream", plot receptor → TF → gene.
-        If "downstream", plot gene → TF → receptor.
+        Direction of the result scores. The diagram keeps the same
+        receptor → TF → gene layout for both directions.
     verbose : bool, default=False
         If True, print detailed debugging information about network construction.
     save_path : str or None, default=None
@@ -1368,6 +1451,7 @@ def plot_intracell_sankey(
     -------
     None
     """
+    flow = _normalize_flow(flow)
     networks = build_partial_networks(
         multicell_obj=multicell_obj,
         results=results,
@@ -1377,7 +1461,8 @@ def plot_intracell_sankey(
         top_receptor_n=top_receptor_n,
         top_tf_n=top_tf_n,
         include_before_cells=False,
-        verbose=verbose
+        verbose=verbose,
+        direction=flow
     )
 
     networks = {
@@ -1438,8 +1523,8 @@ def plot_ligand_sankey(
         If True, select top ligands per ligand cell type.
         If False, select top ligands globally.
     flow : str, default="upstream"
-        If "upstream", plot ligand → receptor → TF → gene.
-        If "downstream", plot gene → TF → receptor → ligand.
+        Direction of the result scores. The diagram keeps the same
+        ligand → receptor → TF → gene layout for both directions.
     verbose : bool, default=False
         If True, print detailed debugging information about network construction.
     save_path : str or None, default=None
@@ -1449,6 +1534,7 @@ def plot_ligand_sankey(
     -------
     None
     """
+    flow = _normalize_flow(flow)
     networks = build_partial_networks(
         multicell_obj=multicell_obj,
         results=results,
@@ -1460,7 +1546,8 @@ def plot_ligand_sankey(
         top_tf_n=top_tf_n,
         per_celltype=per_celltype,
         include_before_cells=False,
-        verbose=verbose
+        verbose=verbose,
+        direction=flow
     )
 
     networks = {
@@ -1528,8 +1615,8 @@ def plot_intercell_sankey(
         If True, select top ligands per ligand cell type.
         If False, select top ligands globally.
     flow : str, default="upstream"
-        If "upstream", plot upstream receptor → upstream TF → ligand → receptor → TF → gene.
-        If "downstream", plot gene → TF → receptor → ligand → upstream TF → upstream receptor.
+        Direction of the result scores. The diagram keeps the same upstream
+        receptor → upstream TF → ligand → receiver receptor → TF → gene layout.
     verbose : bool, default=False
         If True, print detailed debugging information about network construction.
     save_path : str or None, default=None
@@ -1539,6 +1626,7 @@ def plot_intercell_sankey(
     -------
     None
     """
+    flow = _normalize_flow(flow)
 
     networks = build_partial_networks(
         multicell_obj=multicell_obj,
@@ -1552,7 +1640,8 @@ def plot_intercell_sankey(
         before_top_n=before_top_n,
         per_celltype=per_celltype,
         include_before_cells=True,
-        verbose=verbose
+        verbose=verbose,
+        direction=flow
     )
 
     networks = {

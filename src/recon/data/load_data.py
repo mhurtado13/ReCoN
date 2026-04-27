@@ -1,6 +1,7 @@
 from importlib.resources import files
 import pandas as pd
 import os
+from typing import Optional, Union
 
 receptor_gene_resources = [
     "human_receptor_gene_from_NichenetPKN",
@@ -22,6 +23,19 @@ TUTORIAL_DATA_REGISTRY = {
 
 
 def load_receptor_genes(receptor_gene_list) -> "pd.DataFrame":
+    """Load a packaged receptor-to-gene prior.
+
+    Parameters
+    ----------
+    receptor_gene_list : str
+        Name of the packaged prior to load. Available values are listed in
+        ``receptor_gene_resources``.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Receptor-to-gene edge table.
+    """
 
     if receptor_gene_list not in receptor_gene_resources:
        raise ValueError(f"The name of the receptor gene list must be in {receptor_gene_resources}")
@@ -75,7 +89,9 @@ def fetch_tutorial_data(filename: str, data_dir: str = "./data", force: bool = F
     except ImportError:
         raise ImportError(
             "pooch is required to download tutorial data. "
-            "Install it with: pip install pooch"
+            "Install the tutorial extra with: pip install 'recon[tutorials]'. "
+            "For editable or development installs, you can also run: "
+            "pip install pooch"
         )
     
     if filename not in TUTORIAL_DATA_REGISTRY:
@@ -132,3 +148,34 @@ def fetch_all_tutorial_data(data_dir: str = "./data/perturbation_tuto", force: b
     for filename in TUTORIAL_DATA_REGISTRY:
         paths[filename] = fetch_tutorial_data(filename, data_dir=data_dir, force=force)
     return paths
+
+
+def download_tutorial(
+    filename: Optional[str] = None,
+    data_dir: str = "./data",
+    force: bool = False
+) -> Union[str, dict]:
+    """Download one tutorial file, or all tutorial files.
+
+    This is a user-facing alias around :func:`fetch_tutorial_data` and
+    :func:`fetch_all_tutorial_data`.
+
+    Parameters
+    ----------
+    filename : str, optional
+        Tutorial file to download. If omitted, all registered tutorial files
+        are downloaded.
+    data_dir : str, default="./data"
+        Base directory for downloaded files.
+    force : bool, default=False
+        If True, re-download existing files.
+
+    Returns
+    -------
+    str or dict
+        Local path for a single file, or a mapping from filenames to local
+        paths when downloading all files.
+    """
+    if filename is None:
+        return fetch_all_tutorial_data(data_dir=data_dir, force=force)
+    return fetch_tutorial_data(filename, data_dir=data_dir, force=force)

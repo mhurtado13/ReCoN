@@ -342,6 +342,15 @@ class TestGetTopLigandsPerCelltype:
 
 class TestSankeyPlotRendering:
     """Test actual sankey plot rendering functions."""
+
+    @staticmethod
+    def _figure_links(fig):
+        sankey = fig.data[0]
+        labels = list(sankey.node.label)
+        return {
+            (labels[source], labels[target])
+            for source, target in zip(sankey.link.source, sankey.link.target)
+        }
     
     def test_plot_3layer_sankey(self, monkeypatch):
         """Test 3-layer sankey plot rendering."""
@@ -566,3 +575,141 @@ class TestSankeyPlotRendering:
         except Exception:
             # May fail due to empty data, which is OK for this test
             pass
+
+    def test_intracell_upstream_visual_links_are_unchanged(self, monkeypatch):
+        """Mirror tutorial 3's upstream Receptor -> TF -> Gene visual cascade."""
+        import plotly.graph_objects as go
+
+        receptor_tf_df = pd.DataFrame({
+            "receptor": ["REC1_receptor::CellA"],
+            "tf": ["TF1::CellA"],
+            "weight": [1.0],
+        })
+        gene_tf_df = pd.DataFrame({
+            "tf_clean": ["TF1::CellA"],
+            "gene": ["GENE1::CellA"],
+            "weight": [1.0],
+        })
+
+        figures = []
+
+        def mock_show(self, **kwargs):
+            figures.append(self)
+
+        monkeypatch.setattr(go.Figure, "show", mock_show)
+
+        sankey_paths.plot_3layer_sankey(
+            receptor_tf_df,
+            gene_tf_df,
+            cell_type="CellA",
+            flow="upstream",
+        )
+
+        assert len(figures) == 1
+        assert self._figure_links(figures[0]) == {
+            ("REC1_receptor", "TF1"),
+            ("TF1", "GENE1"),
+        }
+
+    def test_downstream_network_stays_anchored_on_gene_seeds(self):
+        """Downstream result sets still visualize upstream regulators of gene seeds."""
+        tf_gene_layer = pd.DataFrame({
+            "source": ["TF1_TF::CellA", "SEED_TF::CellA"],
+            "target": ["SEED::CellA", "WRONG_DOWNSTREAM::CellA"],
+            "weight": [0.9, 0.2],
+        })
+        top_tfs = pd.DataFrame({
+            "node": ["TF1_TF::CellA", "SEED_TF::CellA"],
+            "score": [0.8, 0.7],
+        })
+
+        result = sankey_paths.extract_gene_tf_pairs(
+            tf_gene_layer,
+            top_tfs,
+            seeds=pd.Index(["SEED::CellA"]),
+        )
+
+        assert result[["tf_clean", "gene", "weight"]].to_dict("records") == [
+            {
+                "tf_clean": "TF1::CellA",
+                "gene": "SEED::CellA",
+                "weight": 0.9,
+            }
+        ]
+
+    def test_downstream_plot_keeps_seed_layer_on_right(self, monkeypatch):
+        """Downstream display uses the same receptor → TF → gene layout."""
+        captured = {}
+
+        def mock_sankey(**kwargs):
+            captured["source"] = list(kwargs["link"]["source"])
+            captured["target"] = list(kwargs["link"]["target"])
+            captured["labels"] = list(kwargs["node"]["label"])
+            return "sankey"
+
+        class MockFigure:
+            def __init__(self, data):
+                self.data = data
+
+            def update_layout(self, **kwargs):
+                pass
+
+            def add_annotation(self, **kwargs):
+                pass
+
+            def show(self):
+                pass
+
+        monkeypatch.setattr(sankey_paths.go, "Sankey", mock_sankey)
+        monkeypatch.setattr(sankey_paths.go, "Figure", MockFigure)
+
+        receptor_tf_df = pd.DataFrame({
+            "receptor": ["REC1_receptor::CellA"],
+            "tf": ["TF1_TF::CellA"],
+            "weight": [1.0],
+        })
+        gene_tf_df = pd.DataFrame({
+            "tf_clean": ["TF1::CellA"],
+            "gene": ["SEED::CellA"],
+            "weight": [1.0],
+        })
+
+        sankey_paths.plot_3layer_sankey(
+            receptor_tf_df,
+            gene_tf_df,
+            cell_type="CellA",
+            flow="downstream",
+        )
+
+        assert captured["labels"] == ["REC1_receptor", "TF1_TF", "SEED"]
+        assert captured["source"] == [0, 1]
+        assert captured["target"] == [1, 2]
+
+    def test_direct_seed_tfs_and_receptors_are_included(self):
+        """Seed genes pull immediate upstream TFs/receptors even if absent from top ranks."""
+        tf_gene_layer = pd.DataFrame({
+            "source": ["DIRECT_TF::CellA"],
+            "target": ["SEED::CellA"],
+            "weight": [1.0],
+        })
+        receptor_tf_layer = pd.DataFrame({
+            "col1": ["DIRECT_TF::CellA"],
+            "col2": ["DIRECT_REC_receptor::CellA"],
+            "weight": [1.0],
+        })
+
+        top_tfs = sankey_paths._include_direct_seed_tfs(
+            pd.DataFrame(columns=["multiplex", "node", "score"]),
+            tf_gene_layer,
+            pd.Series(["SEED::CellA"]),
+            "CellA",
+        )
+        top_receptors = sankey_paths._include_direct_tf_receptors(
+            pd.DataFrame(columns=["multiplex", "node", "score"]),
+            receptor_tf_layer,
+            top_tfs,
+            "CellA",
+        )
+
+        assert top_tfs["node"].tolist() == ["DIRECT_TF::CellA"]
+        assert top_receptors["node"].tolist() == ["DIRECT_REC_receptor::CellA"]

@@ -13,6 +13,16 @@ import recon.plot
 
 
 class Celltype:
+    """Single-cell-type multilayer network for ReCoN exploration.
+
+    A ``Celltype`` contains two multiplexes, one for intracellular gene
+    regulation and one for receptors, plus a bipartite receptor-to-gene layer.
+    Use :meth:`Multixrank` when you need direct access to the underlying
+    HuMMuS/Multixrank object, or :meth:`explore` for the common one-line
+    workflow that builds the multilayer object and runs random walk with
+    restart.
+    """
+
     def __init__(
         self,
         celltype_name: str,
@@ -204,6 +214,23 @@ class Celltype:
         restart_proba=0.7,
         verbose=True
     ):
+        """Build the HuMMuS ``Multixrank`` object for this cell type.
+
+        Parameters
+        ----------
+        self_loops : bool, default=True
+            Whether to add self-loops in each layer.
+        restart_proba : float, default=0.7
+            Random-walk restart probability.
+        verbose : bool, default=True
+            Passed to HuMMuS when constructing the multilayer object.
+
+        Returns
+        -------
+        hummuspy.create_multilayer.Multixrank
+            Configured multilayer object. Call ``random_walk_rank()`` on it to
+            compute node scores, or use :meth:`explore` to do both steps.
+        """
 
         if self.seeds == []:
             warnings.warn("""
@@ -286,6 +313,57 @@ class Celltype:
 
         return multilayer
 
+    def explore(
+        self,
+        seeds: Union[List, Dict, None] = None,
+        self_loops=True,
+        restart_proba=0.7,
+        verbose=True,
+        **random_walk_rank_kwargs
+    ):
+        """Build the multilayer object and run random walk with restart.
+
+        This is the convenience method for the usual workflow::
+
+            results = celltype.explore(seeds=["MYC"], restart_proba=0.7)
+
+        It stores the created HuMMuS object in ``self.multilayer`` and the
+        resulting scores in ``self.results`` before returning the scores.
+
+        Parameters
+        ----------
+        seeds : list, dict, optional
+            Seeds to use for this run. If provided, ``self.seeds`` is updated
+            before building the multilayer object. Dictionaries are interpreted
+            as weighted seeds.
+        self_loops : bool, default=True
+            Whether to add self-loops in each layer.
+        restart_proba : float, default=0.7
+            Random-walk restart probability.
+        verbose : bool, default=True
+            Passed to :meth:`Multixrank`.
+        **random_walk_rank_kwargs
+            Extra keyword arguments forwarded to
+            ``self.multilayer.random_walk_rank``.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Random-walk ranking results returned by HuMMuS.
+        """
+        if seeds is not None:
+            self.seeds = seeds
+
+        self.multilayer = self.Multixrank(
+            self_loops=self_loops,
+            restart_proba=restart_proba,
+            verbose=verbose
+        )
+        self.results = self.multilayer.random_walk_rank(
+            **random_walk_rank_kwargs
+        )
+        return self.results
+
     def rename_celltype(
         self,
         celltype_name
@@ -323,6 +401,15 @@ class Celltype:
 
             
 class Multicell(Celltype):
+    """Multicellular multilayer network.
+
+    ``Multicell`` combines several :class:`Celltype` objects with a
+    cell-cell communication layer. It supports the same :meth:`Multixrank` and
+    :meth:`explore` workflow as ``Celltype``; ``explore`` creates
+    ``self.multilayer``, runs ``random_walk_rank()``, stores ``self.results``,
+    and returns the result table.
+    """
+
     def __init__(
         self,
         celltypes: Union[
@@ -386,7 +473,7 @@ class Multicell(Celltype):
             if verbose:
                 warnings.warn(
                     "The celltypes dictionary was converted to" +
-                    "a list of Celltype objects.\n" +
+                    " a list of Celltype objects.\n" +
                     "The keys of the dictionary will be the celltype names.")
         else:
             self.celltypes_names = [
@@ -565,6 +652,29 @@ class Multicell(Celltype):
             cell_communication_layer_name=cell_communication_layer_name
         )
 
+    def explore(
+        self,
+        seeds: Union[List, Dict, None] = None,
+        self_loops=True,
+        restart_proba=0.7,
+        verbose=True,
+        **random_walk_rank_kwargs
+    ):
+        """Build the multicellular multilayer object and run RWR.
+
+        Parameters are the same as :meth:`Celltype.explore`. Multicellular seed
+        names usually include the cell-type suffix, for example
+        ``"IL6::Macrophage"`` for gene-layer seeds or ``"IL6-Macrophage"`` for
+        cell-communication-layer seeds.
+        """
+        return super().explore(
+            seeds=seeds,
+            self_loops=self_loops,
+            restart_proba=restart_proba,
+            verbose=verbose,
+            **random_walk_rank_kwargs
+        )
+
 
 def format_multicell_results(
     multicell_multixrank_results,
@@ -572,16 +682,26 @@ def format_multicell_results(
     keep_layers: Union[str, List[str]]="gene",
     split: str="::"
 ):
-    """Format multicellular multixrank results as gene profiles per cell type.
+    """Format multicellular random-walk results as cell-type profiles.
 
-    Args:
-        multicell_multixrank_results: Results from multicellular multixrank random walk.
-        celltypes: List of cell types included in the multicellular analysis.
-        keep_layers: Layers to keep in the output profiles. Can be "gene", "grn", or a list of specific layers.
-        split: Delimiter used to separate gene names and cell type names in the node identifiers.
+    Parameters
+    ----------
+    multicell_multixrank_results : pandas.DataFrame
+        Result table returned by ``Multicell.explore()`` or by
+        ``Multicell.Multixrank(...).random_walk_rank()``. It must contain at
+        least ``node``, ``layer``, and ``score`` columns.
+    celltypes : list of str
+        Cell types included in the multicellular analysis.
+    keep_layers : str or list of str, default="gene"
+        Layer name pattern(s) to retain. The default keeps gene-layer scores.
+    split : str, default="::"
+        Delimiter separating node names from cell-type names.
 
-    Returns:
-        DataFrame with cell types as columns,  genes as rows, and random walk with restart scores as values.
+    Returns
+    -------
+    pandas.DataFrame
+        Matrix with genes as rows, cell types as columns, and random-walk
+        scores as values.
     """
 
     cell_type_profiles = multicell_multixrank_results[multicell_multixrank_results['layer'].str.contains(keep_layers)]
@@ -710,6 +830,47 @@ def multicell_targets(
     verbose=True,
     keep_layers="gene",
 ):
+    """Predict direct and indirect perturbation effects across cell types.
+
+    The function builds a multicellular ReCoN network, runs intracellular
+    random walk with restart to estimate direct effects, then propagates the
+    resulting ligand signal through cell-cell communication to estimate
+    indirect effects.
+
+    Parameters
+    ----------
+    seeds : list or dict
+        Perturbed genes or weighted seed genes.
+    celltypes : list or dict
+        Cell-type names, ``Celltype`` objects, dictionaries accepted by
+        ``Celltype``, or a mapping from names to those objects.
+    ccc : pandas.DataFrame
+        Cell-cell communication table with ligand ``source``, receptor
+        ``target``, ``celltype_source``, ``celltype_target``, and weight
+        columns.
+    grn : pandas.DataFrame or str
+        Gene regulatory network shared by the cell types, unless individual
+        ``Celltype`` objects are provided.
+    receptor_grn : pandas.DataFrame or str
+        Receptor-to-gene bipartite network, or a loadable resource/path.
+    restart_proba : float, default=0.6
+        Random-walk restart probability.
+    extend_seeds : bool, default=False
+        If True, expand each seed to all cell types in the communication layer.
+    njobs : int, default=-1
+        Number of parallel jobs for indirect-effect runs.
+    verbose : bool or int, default=True
+        Controls progress messages and HuMMuS verbosity.
+    keep_layers : str or list of str, default="gene"
+        Layers retained for indirect-effect computations.
+
+    Returns
+    -------
+    tuple[pandas.DataFrame, pandas.DataFrame]
+        ``(direct_effect, indirect_effect)``. Direct effects are indexed by
+        gene and have target cell types as columns. Indirect effects are indexed
+        by gene and have a ``(celltype_target, celltype_source)`` column index.
+    """
     if extend_seeds:
         if type(seeds) is not list and type(seeds) is not dict:
             seeds = list(seeds)
@@ -879,6 +1040,7 @@ def multicell_targets(
 
 
 def summarize_indirect_effects(predictions):
+    """Split combined contribution tables into direct and indirect effects."""
 
     celltypes = predictions.columns.levels[0].tolist()
 
@@ -899,6 +1061,28 @@ def summarize_indirect_effects(predictions):
 
 
 def combine_effects(direct_effect, indirect_effect, alpha=0.8, cell_comm_matrix=None):
+    """Combine direct and indirect perturbation effects.
+
+    Parameters
+    ----------
+    direct_effect : pandas.DataFrame
+        Direct-effect scores with genes as rows and target cell types as
+        columns.
+    indirect_effect : pandas.DataFrame
+        Indirect-effect scores with genes as rows and a two-level column index
+        ``(celltype_target, celltype_source)``.
+    alpha : float, default=0.8
+        Weight assigned to indirect effects. ``1 - alpha`` is assigned to
+        direct effects.
+    cell_comm_matrix : pandas.DataFrame, optional
+        Optional cell-type communication weighting matrix. Rows should be
+        target cell types and columns source cell types.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Combined effect matrix with genes as rows and cell types as columns.
+    """
 
     indirect_effect_summed = {}
 

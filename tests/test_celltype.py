@@ -239,6 +239,48 @@ class TestCelltypeMultixrank:
         assert multilayer is not None
 
 
+class TestCelltypeExplore:
+    """Test Celltype.explore convenience method."""
+
+    def test_explore_stores_multilayer_and_results(
+        self, simple_grn, simple_receptor_grn, monkeypatch
+    ):
+        """Test that explore creates the multilayer object and runs RWR."""
+        expected = pd.DataFrame({"node": ["GENE1"], "score": [1.0]})
+
+        class FakeMultilayer:
+            def random_walk_rank(self, **kwargs):
+                assert kwargs == {"max_iter": 25}
+                return expected
+
+        def fake_multixrank(self, self_loops=True, restart_proba=0.7, verbose=True):
+            assert self.seeds == ["GENE1"]
+            assert self_loops is False
+            assert restart_proba == 0.5
+            assert verbose is False
+            return FakeMultilayer()
+
+        monkeypatch.setattr(Celltype, "Multixrank", fake_multixrank)
+
+        ct = Celltype(
+            celltype_name="TestCell",
+            grn_graph=simple_grn,
+            receptor_grn_bipartite=simple_receptor_grn,
+        )
+
+        result = ct.explore(
+            seeds=["GENE1"],
+            self_loops=False,
+            restart_proba=0.5,
+            verbose=False,
+            max_iter=25,
+        )
+
+        assert result is expected
+        assert ct.results is expected
+        assert hasattr(ct, "multilayer")
+
+
 class TestCelltypeAdvancedOptions:
     """Test advanced Celltype configuration options."""
     
