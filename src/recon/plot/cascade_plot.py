@@ -20,6 +20,7 @@ from .cascade_core import (
     setup_figure,
     draw_cells_and_edges,
     add_section_labels,
+    normalize_flow,
     # Node helpers
     celltype_of,
     compute_node_radii,
@@ -63,6 +64,7 @@ def cascade_plot(
     save_path: str = None,
     verbose: bool = False,
     title: str = None,
+    flow: str = "upstream",
 ):
     """Biological cell cascade diagram for a single run.
 
@@ -79,7 +81,12 @@ def cascade_plot(
         Raw seed gene names (e.g. ['Nfkb1', 'Tnf']).
     show_seeds : bool
         If True, seed genes are shown as individual nodes in the nucleus.
+    flow : {'upstream', 'downstream'}, default='upstream'
+        If 'upstream', draw ligand → receptor → TF → gene arrows.
+        If 'downstream', draw gene → TF → receptor → ligand arrows.
     """
+    flow = normalize_flow(flow)
+
     # ── 1. Build & filter networks ──────────────────────────────────────
     edges = build_networks(
         multicell_obj, results,
@@ -194,6 +201,7 @@ def cascade_plot(
         edge_color_fn=_edge_color,
         seed_label=seed_label,
         seed_label_fontsize=seed_label_fontsize,
+        flow=flow,
     )
 
     # ── 9. Labels & legend ──────────────────────────────────────────────
@@ -201,7 +209,7 @@ def cascade_plot(
     draw_type_legend(ax, label_fontsize, show_seeds=show_seeds)
 
     # ── 10. Title ───────────────────────────────────────────────────────
-    fig_title = title or f"Cell signaling cascade — {cell_type or '?'}"
+    fig_title = title or f"Cell signaling cascade ({flow}) — {cell_type or '?'}"
     plt.title(fig_title, fontsize=label_fontsize + 6, pad=12)
 
     plt.tight_layout()
@@ -249,6 +257,7 @@ def contrast_cascade_plot(
     save_path: str = None,
     verbose: bool = False,
     title: str = None,
+    flow: str = "upstream",
 ):
     """Biological cell cascade diagram comparing two runs.
 
@@ -268,14 +277,18 @@ def contrast_cascade_plot(
         'sex': blue (A-enriched) ↔ white ↔ orange (B-enriched).
     normalize_receiver_scores : bool
         Z-score color values within each receiver layer.
+    flow : {'upstream', 'downstream'}, default='upstream'
+        If 'upstream', draw ligand → receptor → TF → gene arrows.
+        If 'downstream', draw gene → TF → receptor → ligand arrows.
     """
-    from cascade_core import (
+    from .cascade_core import (
         delta_to_rgba,
         parse_rgba,
         boost_values_for_color,
         zscore_layer,
         draw_contrast_legend,
     )
+    flow = normalize_flow(flow)
 
     # ── 1. Compute delta metrics from two score vectors ─────────────────
     scores_a = results_a.set_index("node")["score"]
@@ -397,6 +410,7 @@ def contrast_cascade_plot(
         seed_label_fontsize=seed_label_fontsize,
         score_filter_dict=signed_delta,
         lfc_thresholds=delta_thresholds,
+        flow=flow,
     )
 
     # ── 10. Labels & legend ─────────────────────────────────────────────
@@ -417,7 +431,7 @@ def contrast_cascade_plot(
             suffix = "  [warm (hi) vs cold (lo)]"
         if normalize_receiver_scores:
             suffix += "  †norm"
-        fig_title = f"Cell signaling diagram — {cell_type or '?'}{suffix}"
+        fig_title = f"Cell signaling diagram ({flow}) — {cell_type or '?'}{suffix}"
 
     plt.title(fig_title, fontsize=label_fontsize + 6, pad=12)
 

@@ -194,6 +194,13 @@ def short_label(node_name: str) -> str:
     return base.replace("_TF", "").replace("_tf", "").replace("_receptor", "")
 
 
+def normalize_flow(flow: str) -> str:
+    flow = flow.lower()
+    if flow not in {"upstream", "downstream"}:
+        raise ValueError("flow must be either 'upstream' or 'downstream'.")
+    return flow
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Network construction
 # ═══════════════════════════════════════════════════════════════════════════
@@ -629,18 +636,22 @@ def draw_receiver_cell(ax, cx, cy, r, ry_ratio, nuc_cx, cols, label, fontsize):
 
 def draw_single_edge(ax, src, tgt, value, layer_key, rad,
                      positions, lw_ranges, color_fn,
-                     score_filter_dict=None, thresholds=None):
+                     score_filter_dict=None, thresholds=None,
+                     flow="upstream"):
     """Draw a single directed edge: black outline underneath, lighter color on top."""
     if src not in positions or tgt not in positions:
         return
+    flow = normalize_flow(flow)
+    node_ref = src if flow == "upstream" else tgt
     if score_filter_dict is not None and thresholds is not None:
         threshold = thresholds.get(layer_key, 0.0)
-        if abs(score_filter_dict.get(src, 0.0)) < threshold:
+        if abs(score_filter_dict.get(node_ref, 0.0)) < threshold:
             return
 
-    sx, sy = positions[src]
-    tx, ty = positions[tgt]
-    col = color_fn(src, layer_key)
+    visual_src, visual_tgt = (src, tgt) if flow == "upstream" else (tgt, src)
+    sx, sy = positions[visual_src]
+    tx, ty = positions[visual_tgt]
+    col = color_fn(node_ref, layer_key)
 
     if layer_key in lw_ranges:
         vmin, vmax = lw_ranges[layer_key]
@@ -866,8 +877,10 @@ def draw_cells_and_edges(ax, nodes, edges, geo, *,
                          label_fontsize, node_radii, node_type_halo,
                          show_labels, show_seeds, fill_fn, edge_color_fn,
                          seed_label=None, seed_label_fontsize=10,
-                         score_filter_dict=None, lfc_thresholds=None):
+                         score_filter_dict=None, lfc_thresholds=None,
+                         flow="upstream"):
     g = geo
+    flow = normalize_flow(flow)
 
     for i, ct in enumerate(g["sender_ct_order"]):
         sy = g["sender_cy_by_ct"][ct]
@@ -910,6 +923,7 @@ def draw_cells_and_edges(ax, nodes, edges, geo, *,
                 layer_key, rad, positions, lw_ranges, edge_color_fn,
                 score_filter_dict=score_filter_dict,
                 thresholds=lfc_thresholds,
+                flow=flow,
             )
 
     NODE_R = max(0.22, g["RECV_R"] * 0.055)

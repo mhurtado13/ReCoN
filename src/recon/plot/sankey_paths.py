@@ -5,6 +5,21 @@ import plotly.graph_objects as go
 import hashlib
 
 
+def _normalize_seed_nodes(seeds: Union[List[str], pd.Series], cell_type: str) -> pd.Series:
+    """Return seed genes in the canonical ``GENE::CellType`` form."""
+    seed_values = seeds.tolist() if hasattr(seeds, "tolist") else list(seeds)
+    normalized = []
+
+    for seed in seed_values:
+        seed = str(seed)
+        if "::" in seed:
+            normalized.append(seed)
+        else:
+            normalized.append(f"{seed}::{cell_type}")
+
+    return pd.Series(normalized)
+
+
 def get_celltype_grn_receptor_bipartite(
     multicell_obj,
     cell_type: str,
@@ -835,7 +850,7 @@ def build_partial_networks(
         as_dataframe=True
     )
 
-    seeds_prefixed = pd.Series([f"{gene}::{cell_type}" for gene in seeds])
+    seeds_prefixed = _normalize_seed_nodes(seeds, cell_type)
     gene_tf_pairs = extract_gene_tf_pairs(tf_gene_df, top_tfs, seeds_prefixed, verbose=verbose)
     receptor_tf_pairs = extract_receptor_tf_pairs(receptor_tf_df, top_tfs, top_receptors, verbose=verbose)
 
