@@ -229,3 +229,50 @@ class TestMulticellRenaming:
         assert "NewA" in mc.celltypes_names
         assert "NewB" in mc.celltypes_names
         assert "OldA" not in mc.celltypes_names
+
+
+class TestMulticellExplore:
+    """Test Multicell.explore convenience method."""
+
+    def test_explore_stores_multilayer_and_results(
+        self, simple_grn, simple_receptor_grn, simple_cell_communication,
+        monkeypatch
+    ):
+        """Test that Multicell.explore delegates to Multixrank then RWR."""
+        expected = pd.DataFrame({"node": ["GENE1::CellA"], "score": [1.0]})
+
+        class FakeMultilayer:
+            def random_walk_rank(self, **kwargs):
+                assert kwargs == {"tol": 1e-6}
+                return expected
+
+        def fake_multixrank(self, self_loops=True, restart_proba=0.7, verbose=True):
+            assert self.seeds == ["GENE1::CellA"]
+            assert self_loops is True
+            assert restart_proba == 0.6
+            assert verbose is False
+            return FakeMultilayer()
+
+        monkeypatch.setattr(Multicell, "Multixrank", fake_multixrank)
+
+        ct_a = Celltype(
+            celltype_name="CellA",
+            grn_graph=simple_grn.copy(),
+            receptor_grn_bipartite=simple_receptor_grn.copy()
+        )
+
+        mc = Multicell(
+            celltypes=[ct_a],
+            cell_communication_graph=simple_cell_communication
+        )
+
+        result = mc.explore(
+            seeds=["GENE1::CellA"],
+            restart_proba=0.6,
+            verbose=False,
+            tol=1e-6,
+        )
+
+        assert result is expected
+        assert mc.results is expected
+        assert hasattr(mc, "multilayer")
