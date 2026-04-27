@@ -89,7 +89,9 @@ def fetch_tutorial_data(filename: str, data_dir: str = "./data", force: bool = F
     except ImportError:
         raise ImportError(
             "pooch is required to download tutorial data. "
-            "Install it with: pip install pooch"
+            "Install the tutorial extra with: pip install 'recon[tutorials]'. "
+            "For editable or development installs, you can also run: "
+            "pip install pooch"
         )
     
     if filename not in TUTORIAL_DATA_REGISTRY:
