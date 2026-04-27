@@ -74,8 +74,12 @@ def plot_celltype_comparison(df, celltype1, celltype2, quantile=0.999):
     # Set zoomed view limits (pad around outliers)
     xvals = df.loc[mask, celltype1]
     yvals = df.loc[mask, celltype2]
-    axins.set_xlim(0, xvals.max() + 0.1 * np.abs(xvals.max()))
-    axins.set_ylim(0, yvals.max() + 0.1 * np.abs(yvals.max()))
+    xmax = xvals.max() if len(xvals) else 0
+    ymax = yvals.max() if len(yvals) else 0
+    xpad = 0.1 * np.abs(xmax) if xmax != 0 else 1
+    ypad = 0.1 * np.abs(ymax) if ymax != 0 else 1
+    axins.set_xlim(0, xmax + xpad)
+    axins.set_ylim(0, ymax + ypad)
     axins.set_xlabel(f"{celltype1} effect", fontsize=10)
     axins.set_ylabel(f"{celltype2} effect", fontsize=10)
     axins.tick_params(axis="both", which="major", labelsize=8)
