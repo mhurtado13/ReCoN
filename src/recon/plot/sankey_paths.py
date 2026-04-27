@@ -367,6 +367,46 @@ def get_top_receptors(
     return results.iloc[:n, :]
 
 
+def _seed_names_for_cell_type(seeds, cell_type: str) -> pd.Series:
+    """Return seed names in GENE::CellType form."""
+    seed_index = pd.Index(seeds.keys() if isinstance(seeds, dict) else seeds)
+    seed_values = seed_index.astype(str)
+    return pd.Series([
+        seed if "::" in seed else f"{seed}::{cell_type}"
+        for seed in seed_values
+    ])
+
+
+def get_top_genes(
+    results_df: pd.DataFrame,
+    cell_type,
+    n: int = 5,
+    exclude_nodes=None,
+) -> pd.DataFrame:
+    """
+    From a `results_df` of node-scores, identify top gene nodes for a cell type.
+
+    Gene nodes are plain ``GENE::CellType`` nodes in the GRN multiplex; TF and
+    receptor helper nodes keep their ``_TF``/``_receptor`` layer suffixes.
+    """
+    results = results_df.sort_values(by="score", ascending=False)
+    if results.empty:
+        return results
+
+    results = results.copy()
+    results.loc[:, "celltype"] = results["multiplex"].str.replace(r"_(grn|receptor)$", "", regex=True)
+    results = results[results["celltype"] == cell_type]
+    results = results[results["node"].str.endswith(f"::{cell_type}")]
+    results = results[
+        ~results["node"].str.contains(r"_(?:TF|receptor)::", regex=True)
+    ]
+
+    if exclude_nodes is not None:
+        results = results[~results["node"].isin(set(exclude_nodes))]
+
+    return results.iloc[:n, :]
+
+
 def get_top_ligands(
     results_df: pd.DataFrame,
     receptor_ligand_df: pd.DataFrame,
@@ -479,7 +519,7 @@ def get_top_ligands(
 
 
 def extract_gene_tf_pairs(
-    tf_gene_layer, top_tfs, seeds, verbose: bool = False
+    tf_gene_layer, top_tfs, seeds, verbose: bool = False, direction: str = "upstream"
 ) -> pd.DataFrame:
     """
     Given a tf_gene_layer DataFrame (from get_celltype_grn_receptor_bipartite or
@@ -514,8 +554,13 @@ def extract_gene_tf_pairs(
             gene ∈ seeds.
     """
 
-    genes_list = seeds.tolist()
+    direction = direction.lower()
+    if direction not in {"upstream", "downstream"}:
+        raise ValueError("direction must be 'upstream' or 'downstream'")
+
+    genes_list = pd.Index(seeds).astype(str).tolist()
     tfs_list = list(top_tfs["node"].values)
+    tfs_list_clean = [e.replace("_TF::", "::") for e in tfs_list]
 
     if verbose:
         print(f"\n[extract_gene_tf_pairs] === INPUT ===")
@@ -529,11 +574,22 @@ def extract_gene_tf_pairs(
         print(f"  Sample rows (first 3):")
         print(tf_gene_layer.head(3).to_string(index=False))
 
-    # FIXED: TFs are in source, genes are in target (biological direction)
-    filtered_df = tf_gene_layer[
-        tf_gene_layer["source"].isin(tfs_list) &
-        tf_gene_layer["target"].isin(genes_list)
-    ].copy()
+    if direction == "upstream":
+        # TFs are in source, regulated seed genes are in target.
+        filtered_df = tf_gene_layer[
+            tf_gene_layer["source"].isin(tfs_list) &
+            tf_gene_layer["target"].isin(genes_list)
+        ].copy()
+    else:
+        # Downstream starts at seed genes that can act as TFs and keeps their
+        # regulated target genes. Results may name those TFs with or without
+        # the `_TF` layer suffix, so match both spellings.
+        seed_tfs = {seed.replace("::", "_TF::", 1) for seed in genes_list}
+        seed_tfs.update(genes_list)
+        filtered_df = tf_gene_layer[
+            tf_gene_layer["source"].isin(seed_tfs) &
+            tf_gene_layer["target"].isin(tfs_list_clean)
+        ].copy()
     
     if verbose:
         print(f"\n[extract_gene_tf_pairs] === FILTERING RESULT ===")
@@ -629,7 +685,10 @@ def extract_receptor_tf_pairs(
     # FIXED: col2=receptors, col1=genes/TFs (actual data structure!)
     filtered_df = receptor_gene_layer[
         receptor_gene_layer.loc[:, "col2"].isin(receptors_list) &
-        receptor_gene_layer.loc[:, "col1"].isin(tfs_list_clean)
+        (
+            receptor_gene_layer.loc[:, "col1"].isin(tfs_list_clean) |
+            receptor_gene_layer.loc[:, "col1"].isin(tfs_list)
+        )
     ].copy()
 
     if verbose:
@@ -788,7 +847,8 @@ def build_partial_networks(
     before_top_n: int = 5,
     per_celltype: bool = True,
     include_before_cells: bool = False,
-    verbose: bool = False
+    verbose: bool = False,
+    direction: str = "upstream"
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Construct partial or full network layers needed for Sankey plots.
@@ -805,6 +865,11 @@ def build_partial_networks(
       (before_receptor_tf_df, before_tf_ligand_df,
        receptor_ligand_df, receptor_tf_df, gene_tf_df)
     """
+    direction = direction.lower()
+    if direction not in {"upstream", "downstream"}:
+        raise ValueError("direction must be 'upstream' or 'downstream'")
+
+    seeds_prefixed = _seed_names_for_cell_type(seeds, cell_type)
     cc_df = get_cell_communication_layer(
         multicell_obj,
         as_dataframe=True,
@@ -814,6 +879,16 @@ def build_partial_networks(
     top_ligands = get_top_ligands(results, cc_df, n=top_ligand_n, per_celltype=per_celltype)
     top_receptors = get_top_receptors(results, cell_type=cell_type, n=top_receptor_n)
     top_tfs = get_top_tfs(results, cell_type=cell_type, n=top_tf_n)
+    if direction == "downstream":
+        top_genes = get_top_genes(
+            results,
+            cell_type=cell_type,
+            n=top_tf_n,
+            exclude_nodes=seeds_prefixed,
+        )
+        top_tfs = top_genes.assign(
+            node=top_genes["node"].str.replace(f"::{cell_type}$", f"_TF::{cell_type}", regex=True)
+        )
 
     receptor_ligand_top = extract_receptor_ligand_pairs(
         receptor_ligand_df=cc_df,
@@ -835,8 +910,13 @@ def build_partial_networks(
         as_dataframe=True
     )
 
-    seeds_prefixed = pd.Series([f"{gene}::{cell_type}" for gene in seeds])
-    gene_tf_pairs = extract_gene_tf_pairs(tf_gene_df, top_tfs, seeds_prefixed, verbose=verbose)
+    gene_tf_pairs = extract_gene_tf_pairs(
+        tf_gene_df,
+        top_tfs,
+        seeds_prefixed,
+        verbose=verbose,
+        direction=direction,
+    )
     receptor_tf_pairs = extract_receptor_tf_pairs(receptor_tf_df, top_tfs, top_receptors, verbose=verbose)
 
     if not include_before_cells:
@@ -1362,7 +1442,8 @@ def plot_intracell_sankey(
         top_receptor_n=top_receptor_n,
         top_tf_n=top_tf_n,
         include_before_cells=False,
-        verbose=verbose
+        verbose=verbose,
+        direction=flow
     )
 
     networks = {
@@ -1445,7 +1526,8 @@ def plot_ligand_sankey(
         top_tf_n=top_tf_n,
         per_celltype=per_celltype,
         include_before_cells=False,
-        verbose=verbose
+        verbose=verbose,
+        direction=flow
     )
 
     networks = {
@@ -1537,7 +1619,8 @@ def plot_intercell_sankey(
         before_top_n=before_top_n,
         per_celltype=per_celltype,
         include_before_cells=True,
-        verbose=verbose
+        verbose=verbose,
+        direction=flow
     )
 
     networks = {

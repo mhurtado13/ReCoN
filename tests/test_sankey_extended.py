@@ -342,6 +342,15 @@ class TestGetTopLigandsPerCelltype:
 
 class TestSankeyPlotRendering:
     """Test actual sankey plot rendering functions."""
+
+    @staticmethod
+    def _figure_links(fig):
+        sankey = fig.data[0]
+        labels = list(sankey.node.label)
+        return {
+            (labels[source], labels[target])
+            for source, target in zip(sankey.link.source, sankey.link.target)
+        }
     
     def test_plot_3layer_sankey(self, monkeypatch):
         """Test 3-layer sankey plot rendering."""
@@ -566,3 +575,65 @@ class TestSankeyPlotRendering:
         except Exception:
             # May fail due to empty data, which is OK for this test
             pass
+
+    def test_intracell_upstream_visual_links_are_unchanged(self, monkeypatch):
+        """Mirror tutorial 3's upstream Receptor -> TF -> Gene visual cascade."""
+        import plotly.graph_objects as go
+
+        receptor_tf_df = pd.DataFrame({
+            "receptor": ["REC1_receptor::CellA"],
+            "tf": ["TF1::CellA"],
+            "weight": [1.0],
+        })
+        gene_tf_df = pd.DataFrame({
+            "tf_clean": ["TF1::CellA"],
+            "gene": ["GENE1::CellA"],
+            "weight": [1.0],
+        })
+
+        figures = []
+
+        def mock_show(self, **kwargs):
+            figures.append(self)
+
+        monkeypatch.setattr(go.Figure, "show", mock_show)
+
+        sankey_paths.plot_3layer_sankey(
+            receptor_tf_df,
+            gene_tf_df,
+            cell_type="CellA",
+            flow="upstream",
+        )
+
+        assert len(figures) == 1
+        assert self._figure_links(figures[0]) == {
+            ("REC1_receptor", "TF1"),
+            ("TF1", "GENE1"),
+        }
+
+    def test_downstream_network_builds_seed_to_downstream_gene(self):
+        """Downstream construction follows seed TF syntax to target gene nodes."""
+        tf_gene_layer = pd.DataFrame({
+            "source": ["SEED_TF::CellA", "OTHER_TF::CellA"],
+            "target": ["DOWNSTREAM1::CellA", "DOWNSTREAM2::CellA"],
+            "weight": [0.9, 0.2],
+        })
+        top_genes_as_tfs = pd.DataFrame({
+            "node": ["DOWNSTREAM1_TF::CellA"],
+            "score": [0.8],
+        })
+
+        result = sankey_paths.extract_gene_tf_pairs(
+            tf_gene_layer,
+            top_genes_as_tfs,
+            seeds=pd.Index(["SEED::CellA"]),
+            direction="downstream",
+        )
+
+        assert result[["tf_clean", "gene", "weight"]].to_dict("records") == [
+            {
+                "tf_clean": "SEED::CellA",
+                "gene": "DOWNSTREAM1::CellA",
+                "weight": 0.9,
+            }
+        ]
