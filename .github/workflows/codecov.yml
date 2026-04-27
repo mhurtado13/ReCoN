@@ -19,9 +19,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install pytest pytest-cov
-      - name: Install ReCoN in editable mode with compatibility settings
+      - name: Install ReCoN & tutorials in editable mode with compatibility settings
         run: |
-          pip install -e . --config-settings editable_mode=compat
+          pip install -e .[tutorials] --config-settings editable_mode=compat
           pip install pybiomart
       - name: Run tests and collect coverage
         run: |
