@@ -208,7 +208,7 @@ def normalize_flow(flow: str) -> str:
 def build_networks(multicell_obj, results, *,
                    cell_type, seeds, ligand_cells,
                    top_ligand_n, top_receptor_n, top_tf_n,
-                   before_top_n, per_celltype, verbose):
+                   before_top_n, per_celltype, verbose, flow="upstream"):
     """Build and mutually filter the five edge tables.
 
     Parameters
@@ -231,6 +231,7 @@ def build_networks(multicell_obj, results, *,
         per_celltype=per_celltype,
         include_before_cells=True,
         verbose=verbose,
+        direction=flow,
     )
 
     _tf_map = {}
@@ -277,9 +278,9 @@ def build_networks(multicell_obj, results, *,
     t_g = t_g.copy()
     t_g["source"] = t_g["source"].map(_tf_map).fillna(t_g["source"])
 
-    r_t   = r_t[r_t["source"].isin(l_r["target"])]
-    t_g   = t_g[t_g["source"].isin(r_t["target"])]
-    br_bt = br_bt[br_bt["target"].isin(bt_l["source"])]
+    br_bt, bt_l, l_r, r_t, t_g = _sp._filter_connected_sankey_layers(
+        br_bt, bt_l, l_r, r_t, t_g
+    )
 
     return {
         "upstream_r_tf":   br_bt,
@@ -293,7 +294,7 @@ def build_networks(multicell_obj, results, *,
 def build_networks_contrast(multicell_objs, results, score_dict, *,
                             cell_type, seeds, ligand_cells,
                             top_ligand_n, top_receptor_n, top_tf_n,
-                            before_top_n, per_celltype, verbose):
+                            before_top_n, per_celltype, verbose, flow="upstream"):
     """Build networks for contrast mode (two-run comparison)."""
     results_fake = results.copy()
     results_fake["score"] = results_fake["node"].map(
@@ -320,7 +321,7 @@ def build_networks_contrast(multicell_objs, results, score_dict, *,
         cell_type=cell_type, seeds=seeds, ligand_cells=ligand_cells,
         top_ligand_n=top_ligand_n, top_receptor_n=top_receptor_n,
         top_tf_n=top_tf_n, before_top_n=before_top_n,
-        per_celltype=per_celltype, verbose=verbose,
+        per_celltype=per_celltype, verbose=verbose, flow=flow,
     )
 
 
@@ -642,15 +643,14 @@ def draw_single_edge(ax, src, tgt, value, layer_key, rad,
     if src not in positions or tgt not in positions:
         return
     flow = normalize_flow(flow)
-    node_ref = src if flow == "upstream" else tgt
+    node_ref = src
     if score_filter_dict is not None and thresholds is not None:
         threshold = thresholds.get(layer_key, 0.0)
         if abs(score_filter_dict.get(node_ref, 0.0)) < threshold:
             return
 
-    visual_src, visual_tgt = (src, tgt) if flow == "upstream" else (tgt, src)
-    sx, sy = positions[visual_src]
-    tx, ty = positions[visual_tgt]
+    sx, sy = positions[src]
+    tx, ty = positions[tgt]
     col = color_fn(node_ref, layer_key)
 
     if layer_key in lw_ranges:

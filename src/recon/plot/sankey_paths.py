@@ -429,41 +429,503 @@ def _normalize_flow(flow: str) -> str:
     return flow
 
 
-def _append_missing_nodes(rows_df, nodes, cell_type, multiplex_suffix):
-    """Append placeholder result rows for direct topology hits missing from RWR ranks."""
-    existing = set(rows_df["node"]) if "node" in rows_df.columns else set()
-    missing = [node for node in nodes if node not in existing]
-    if not missing:
-        return rows_df
-
-    placeholders = pd.DataFrame({
-        "multiplex": f"{cell_type}_{multiplex_suffix}",
-        "node": missing,
-        "score": 0.0,
-    })
-    if rows_df.empty:
-        return placeholders
-    return pd.concat([rows_df, placeholders], ignore_index=True, sort=False)
+def _top_seed_connected_tfs(results, tf_gene_layer, seeds, cell_type, n):
+    connected_tfs = set(tf_gene_layer.loc[
+        tf_gene_layer["target"].isin(seeds),
+        "source"
+    ])
+    top_tfs = get_top_tfs(results, cell_type=cell_type, n=len(results))
+    top_tfs = top_tfs[top_tfs["node"].isin(connected_tfs)]
+    return top_tfs.iloc[:n, :]
 
 
-def _include_direct_seed_tfs(top_tfs, tf_gene_layer, seeds, cell_type):
-    direct_tfs = list(pd.unique(
-        tf_gene_layer.loc[tf_gene_layer["target"].isin(seeds), "source"]
-    ))
-    return _append_missing_nodes(top_tfs, direct_tfs, cell_type, "grn")
-
-
-def _include_direct_tf_receptors(top_receptors, receptor_tf_layer, top_tfs, cell_type):
+def _top_tf_connected_receptors(results, receptor_tf_layer, top_tfs, cell_type, n):
     tf_nodes = set(top_tfs["node"]) if "node" in top_tfs.columns else set()
     tf_nodes_clean = {tf.replace("_TF::", "::") for tf in tf_nodes}
-    direct_receptors = list(pd.unique(
-        receptor_tf_layer.loc[
-            receptor_tf_layer["col1"].isin(tf_nodes) |
-            receptor_tf_layer["col1"].isin(tf_nodes_clean),
-            "col2"
+    connected_receptors = set(receptor_tf_layer.loc[
+        receptor_tf_layer["col1"].isin(tf_nodes) |
+        receptor_tf_layer["col1"].isin(tf_nodes_clean),
+        "col2"
+    ])
+    top_receptors = get_top_receptors(results, cell_type=cell_type, n=len(results))
+    top_receptors = top_receptors[top_receptors["node"].isin(connected_receptors)]
+    return top_receptors.iloc[:n, :]
+
+
+def _ligand_source_celltypes(top_ligands, receiver_cell_type):
+    return [
+        ct for ct in top_ligands["ligand_celltype"].unique()
+        if ct != receiver_cell_type
+    ]
+
+
+def _filter_connected_sankey_layers(br_bt, bt_l, l_r, r_t, t_g):
+    """Keep only links connected to adjacent layers in the cascade."""
+    layers = [br_bt, bt_l, l_r, r_t, t_g]
+
+    def _connect(left, right):
+        if len(left) == 0 or len(right) == 0:
+            return left, right
+        left = left[left["target"].isin(right["source"])]
+        right = right[right["source"].isin(left["target"])]
+        return left, right
+
+    changed = True
+    while changed:
+        sizes_before = [len(layer) for layer in layers]
+        layers[0], layers[1] = _connect(layers[0], layers[1])
+        layers[1], layers[2] = _connect(layers[1], layers[2])
+        layers[2], layers[3] = _connect(layers[2], layers[3])
+        layers[3], layers[4] = _connect(layers[3], layers[4])
+
+        has_left = [
+            False,
+            len(layers[0]) > 0 and len(layers[1]) > 0,
+            len(layers[1]) > 0 and len(layers[2]) > 0,
+            len(layers[2]) > 0 and len(layers[3]) > 0,
+            len(layers[3]) > 0 and len(layers[4]) > 0,
         ]
-    ))
-    return _append_missing_nodes(top_receptors, direct_receptors, cell_type, "receptor")
+        has_right = [
+            len(layers[0]) > 0 and len(layers[1]) > 0,
+            len(layers[1]) > 0 and len(layers[2]) > 0,
+            len(layers[2]) > 0 and len(layers[3]) > 0,
+            len(layers[3]) > 0 and len(layers[4]) > 0,
+            False,
+        ]
+
+        for idx, layer in enumerate(layers):
+            if len(layer) > 0 and not has_left[idx] and not has_right[idx]:
+                layers[idx] = layer.iloc[0:0].copy()
+
+        changed = sizes_before != [len(layer) for layer in layers]
+
+    return tuple(layers)
+
+
+def _node_celltype(node: str) -> str:
+    return node.rsplit("::", 1)[-1] if "::" in node else ""
+
+
+def _as_tf_node(node: str) -> str:
+    if "_TF::" in node:
+        return node
+    if "::" in node:
+        gene, cell = node.split("::", 1)
+        return f"{gene}_TF::{cell}"
+    return node
+
+
+def _as_receptor_node(node: str) -> str:
+    if "_receptor::" in node:
+        return node
+    if "::" in node:
+        gene, cell = node.split("::", 1)
+        return f"{gene}_receptor::{cell}"
+    return node
+
+
+def _clean_tf_node(node: str) -> str:
+    return str(node).replace("_TF::", "::")
+
+
+def _rank_nodes(results, nodes, n):
+    if len(nodes) == 0:
+        return pd.DataFrame(columns=results.columns)
+    ranked = results[results["node"].isin(set(nodes))].sort_values("score", ascending=False)
+    return ranked.iloc[:n, :]
+
+
+def _rank_downstream_receptors(results, receptors, n, per_celltype):
+    ranked = _rank_nodes(results, receptors, len(results))
+    if not per_celltype or ranked.empty:
+        return ranked.iloc[:n, :]
+
+    ranked = ranked.copy()
+    ranked.loc[:, "celltype"] = ranked["node"].astype(str).apply(_node_celltype)
+    return (
+        ranked
+        .sort_values(["celltype", "score"], ascending=[True, False])
+        .groupby("celltype", group_keys=False)
+        .head(n)
+        .drop(columns=["celltype"])
+        .reset_index(drop=True)
+    )
+
+
+def _standardize_node_name(node: str) -> str:
+    node = str(node)
+    if "-" in node and "::" not in node:
+        gene, cell = node.rsplit("-", 1)
+        return f"{gene}::{cell}"
+    return node
+
+
+def _rank_ligands_for_downstream(results, ligands, n, per_celltype):
+    if len(ligands) == 0:
+        return pd.DataFrame(columns=["multiplex", "node", "score", "node_std", "ligand_celltype"])
+
+    ligand_set = set(ligands)
+    ranked = results[results["multiplex"] == "cell_communication"].copy()
+    if ranked.empty:
+        ranked = pd.DataFrame(columns=list(results.columns) + ["node_std", "ligand_celltype"])
+    else:
+        ranked.loc[:, "node_std"] = ranked["node"].astype(str).apply(_standardize_node_name)
+        ranked = ranked[ranked["node_std"].isin(ligand_set)].sort_values("score", ascending=False)
+
+    seen = set(ranked["node_std"]) if "node_std" in ranked.columns else set()
+    missing = [lig for lig in ligands if lig not in seen]
+    if missing:
+        ranked = pd.concat([
+            ranked,
+            pd.DataFrame({
+                "multiplex": "cell_communication",
+                "node": missing,
+                "score": 0.0,
+                "node_std": missing,
+            }),
+        ], ignore_index=True, sort=False)
+
+    ranked.loc[:, "ligand_celltype"] = ranked["node_std"].str.split("::", n=1).str[-1]
+    if per_celltype:
+        return (
+            ranked
+            .sort_values(["ligand_celltype", "score"], ascending=[True, False])
+            .groupby("ligand_celltype", group_keys=False)
+            .head(n)
+            .reset_index(drop=True)
+        )
+    return ranked.sort_values("score", ascending=False).head(n).reset_index(drop=True)
+
+
+def _is_tf_node_series(values):
+    return values.astype(str).str.contains(r"_TF::", regex=True)
+
+
+def _tf_name_sets(top_tfs):
+    if "node" not in top_tfs.columns:
+        return set(), set()
+    tf_nodes = set(top_tfs["node"].astype(str))
+    tf_clean = {tf.replace("_TF::", "::") for tf in tf_nodes}
+    return tf_nodes, tf_clean
+
+
+def _filter_receptor_targets_to_tfs(receptor_tf_df, top_tfs):
+    tf_nodes, tf_clean = _tf_name_sets(top_tfs)
+    return receptor_tf_df[
+        receptor_tf_df["col1"].isin(tf_nodes) |
+        receptor_tf_df["col1"].isin(tf_clean)
+    ].copy()
+
+
+def _normalize_downstream_plot_links(l_r, r_t, t_g):
+    l_r = l_r.copy()
+    r_t = r_t.copy()
+    t_g = t_g.copy()
+
+    if len(l_r) > 0:
+        l_r.loc[:, "target"] = l_r["target"].astype(str).apply(_as_receptor_node)
+    if len(r_t) > 0:
+        r_t.loc[:, "source"] = r_t["source"].astype(str).apply(_as_receptor_node)
+        r_t.loc[:, "target"] = r_t["target"].astype(str).apply(_clean_tf_node)
+    if len(t_g) > 0:
+        t_g.loc[:, "source"] = t_g["source"].astype(str).apply(_clean_tf_node)
+
+    return l_r, r_t, t_g
+
+
+def _format_sankey_links(df, source_col, target_col):
+    return df.loc[:, [source_col, target_col, "weight"]].rename(columns={
+        source_col: "source",
+        target_col: "target",
+        "weight": "value"
+    })
+
+
+def _normalize_link_values(link_dfs, flow):
+    for df in link_dfs:
+        total = df["value"].sum()
+        if total > 0:
+            df["value"] /= total
+
+
+def _build_layered_links(layer_edges, layer_x):
+    links_list = []
+    node_ids = []
+    labels_by_id = {}
+    x_by_id = {}
+    layer_by_id = {}
+
+    for link_df, source_layer, target_layer in layer_edges:
+        if len(link_df) == 0:
+            continue
+        link_df = link_df.copy()
+        link_df.loc[:, "source_id"] = source_layer + "::" + link_df["source"].astype(str)
+        link_df.loc[:, "target_id"] = target_layer + "::" + link_df["target"].astype(str)
+        links_list.append(link_df)
+
+    links = pd.concat(links_list, ignore_index=True)
+
+    for col in ["source_id", "target_id"]:
+        for node_id in links[col].dropna().astype(str):
+            if node_id in labels_by_id:
+                continue
+            layer, label = node_id.split("::", 1)
+            node_ids.append(node_id)
+            labels_by_id[node_id] = label
+            x_by_id[node_id] = layer_x[layer]
+            layer_by_id[node_id] = layer
+
+    node_idx = {node_id: i for i, node_id in enumerate(node_ids)}
+    links.loc[:, "source_idx"] = links["source_id"].map(node_idx)
+    links.loc[:, "target_idx"] = links["target_id"].map(node_idx)
+
+    y_by_id = {}
+    for layer in layer_x:
+        layer_nodes = [node_id for node_id in node_ids if layer_by_id[node_id] == layer]
+        if len(layer_nodes) == 1:
+            y_by_id[layer_nodes[0]] = 0.5
+            continue
+        for idx, node_id in enumerate(layer_nodes):
+            y_by_id[node_id] = 0.02 + (0.96 * idx / max(len(layer_nodes) - 1, 1))
+
+    return (
+        links,
+        [labels_by_id[node_id] for node_id in node_ids],
+        [x_by_id[node_id] for node_id in node_ids],
+        [y_by_id[node_id] for node_id in node_ids],
+    )
+
+
+def _prepare_6layer_links(
+    before_receptor_tf_df,
+    before_tf_ligand_df,
+    ligand_receptor_df,
+    receptor_tf_df,
+    gene_tf_df,
+    flow,
+):
+    br_bt = _format_sankey_links(before_receptor_tf_df, "receptor", "tf")
+    bt_l = _format_sankey_links(before_tf_ligand_df, "tf_clean", "gene")
+    l_r = _format_sankey_links(ligand_receptor_df, "ligand", "receptor_clean")
+    receptor_tf_col = "tf_clean" if flow == "downstream" and "tf_clean" in receptor_tf_df.columns else "tf"
+    r_t = _format_sankey_links(receptor_tf_df, "receptor", receptor_tf_col)
+    t_g = _format_sankey_links(gene_tf_df, "tf_clean", "gene")
+
+    if flow == "downstream":
+        l_r, r_t, t_g = _normalize_downstream_plot_links(l_r, r_t, t_g)
+
+    return _filter_connected_sankey_layers(br_bt, bt_l, l_r, r_t, t_g)
+
+
+def _extract_downstream_gene_tf_pairs(tf_gene_layer, top_tfs, top_genes):
+    tfs, tfs_clean = _tf_name_sets(top_tfs)
+    genes = set(top_genes["node"]) if "node" in top_genes.columns else set()
+    filtered_df = tf_gene_layer[
+        (
+            tf_gene_layer["source"].isin(tfs) |
+            tf_gene_layer["source"].isin(tfs_clean)
+        ) &
+        tf_gene_layer["target"].isin(genes)
+    ].copy()
+    filtered_df = filtered_df.rename(columns={"source": "tf", "target": "gene"})
+    filtered_df.loc[:, "tf_clean"] = filtered_df["tf"].str.replace("_TF", "", regex=False)
+    return filtered_df
+
+
+def _build_downstream_networks(
+    multicell_obj,
+    results,
+    cell_type,
+    seeds,
+    ligand_cells,
+    top_ligand_n,
+    top_receptor_n,
+    top_tf_n,
+    per_celltype,
+    include_before_cells,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    seeds_prefixed = _seed_names_for_cell_type(seeds, cell_type)
+    seed_tfs = set(seeds_prefixed[seeds_prefixed.str.contains(r"_TF::", regex=True)])
+    seed_receptors = set(seeds_prefixed[seeds_prefixed.str.contains(r"_receptor::", regex=True)])
+    plain_gene_seeds = set(seeds_prefixed) - seed_tfs - seed_receptors
+
+    source_tf_gene_df = get_celltype_gene_layer(
+        multicell_obj=multicell_obj,
+        cell_type=cell_type,
+        layer_name="gene",
+        as_dataframe=True,
+    )
+    source_receptor_tf_df = get_celltype_grn_receptor_bipartite(
+        multicell_obj=multicell_obj,
+        cell_type=cell_type,
+        as_dataframe=True,
+    )
+
+    if seed_receptors:
+        source_receptor_tf_pairs = source_receptor_tf_df[
+            source_receptor_tf_df["col2"].isin(seed_receptors)
+        ].copy()
+        downstream_source_tfs = set(source_receptor_tf_pairs["col1"])
+        source_receptor_tf_pairs = source_receptor_tf_pairs.rename(
+            columns={"col2": "receptor", "col1": "tf"}
+        )
+    else:
+        source_receptor_tf_pairs = pd.DataFrame(columns=["receptor", "tf", "weight"])
+        downstream_source_tfs = set()
+
+    source_tfs = seed_tfs | downstream_source_tfs
+    source_tf_gene_pairs = source_tf_gene_df[
+        source_tf_gene_df["source"].isin(source_tfs)
+    ].copy()
+    source_ligand_candidates = set(source_tf_gene_pairs["target"]) | plain_gene_seeds
+    source_tf_gene_pairs = source_tf_gene_pairs.rename(columns={"source": "tf", "target": "gene"})
+    if len(source_tf_gene_pairs):
+        source_tf_gene_pairs.loc[:, "tf_clean"] = source_tf_gene_pairs["tf"].str.replace(
+            "_TF", "", regex=False
+        )
+    else:
+        source_tf_gene_pairs = pd.DataFrame(columns=["tf_clean", "gene", "weight", "tf"])
+
+    if not include_before_cells:
+        return (
+            pd.DataFrame(columns=["receptor", "tf", "weight"]),
+            pd.DataFrame(columns=["tf_clean", "gene", "weight"]),
+            pd.DataFrame(columns=["ligand", "receptor", "receptor_clean", "weight"]),
+            source_receptor_tf_pairs,
+            source_tf_gene_pairs,
+        )
+
+    receptor_cells = ligand_cells if ligand_cells else None
+    cc_df = get_cell_communication_layer(
+        multicell_obj,
+        as_dataframe=True,
+        ligand_cells=[cell_type],
+        receptor_cells=receptor_cells,
+    )
+    cc_df = cc_df[cc_df["ligand"].isin(source_ligand_candidates)].copy()
+    if cc_df.empty:
+        return (
+            source_receptor_tf_pairs,
+            source_tf_gene_pairs,
+            pd.DataFrame(columns=["ligand", "receptor", "receptor_clean", "weight"]),
+            pd.DataFrame(columns=["receptor", "tf", "weight"]),
+            pd.DataFrame(columns=["tf_clean", "gene", "weight"]),
+        )
+
+    top_ligands = _rank_ligands_for_downstream(
+        results,
+        list(pd.unique(cc_df["ligand"])),
+        top_ligand_n,
+        per_celltype,
+    )
+    top_ligand_nodes = set(top_ligands["node_std"].astype(str)) if "node_std" in top_ligands.columns else set()
+    cc_df = cc_df[cc_df["ligand"].isin(top_ligand_nodes)]
+
+    connected_receptors = set(cc_df["receptor_clean"])
+    receptors_with_tf_targets = set()
+    receptor_tf_by_cell = {}
+    top_tfs_by_cell = {}
+    for downstream_cell in sorted({_node_celltype(r) for r in connected_receptors}):
+        if not downstream_cell:
+            continue
+        receptor_tf_df = get_celltype_grn_receptor_bipartite(
+            multicell_obj=multicell_obj,
+            cell_type=downstream_cell,
+            as_dataframe=True,
+        )
+        candidate_tfs = set(receptor_tf_df.loc[
+            receptor_tf_df["col2"].isin(connected_receptors),
+            "col1"
+        ])
+        top_tfs_for_cell = _rank_nodes(
+            results,
+            {tf for tf in candidate_tfs if "_TF::" in str(tf)} |
+            {_as_tf_node(tf) for tf in candidate_tfs},
+            len(results),
+        )
+        receptor_tf_df = _filter_receptor_targets_to_tfs(receptor_tf_df, top_tfs_for_cell)
+        receptor_tf_df = receptor_tf_df[
+            receptor_tf_df["col2"].isin(connected_receptors)
+        ]
+        receptors_with_tf_targets.update(receptor_tf_df["col2"])
+        receptor_tf_by_cell[downstream_cell] = receptor_tf_df
+        top_tfs_by_cell[downstream_cell] = top_tfs_for_cell
+
+    top_receptors = _rank_downstream_receptors(
+        results,
+        receptors_with_tf_targets,
+        top_receptor_n,
+        per_celltype,
+    )
+    ligand_receptor_top = extract_receptor_ligand_pairs(
+        receptor_ligand_df=cc_df,
+        top_ligands_df=top_ligands,
+        top_receptors_df=top_receptors,
+    )
+
+    all_receptor_tf_pairs = []
+    all_gene_tf_pairs = []
+    for downstream_cell in sorted({_node_celltype(r) for r in top_receptors["node"]}):
+        if not downstream_cell:
+            continue
+        receptor_tf_df = receptor_tf_by_cell.get(downstream_cell)
+        if receptor_tf_df is None:
+            receptor_tf_df = get_celltype_grn_receptor_bipartite(
+                multicell_obj=multicell_obj,
+                cell_type=downstream_cell,
+                as_dataframe=True,
+            )
+            receptor_tf_df = _filter_receptor_targets_to_tfs(
+                receptor_tf_df,
+                top_tfs_by_cell.get(downstream_cell, pd.DataFrame(columns=results.columns)),
+            )
+        connected_tfs = set(receptor_tf_df.loc[
+            receptor_tf_df["col2"].isin(set(top_receptors["node"])),
+            "col1"
+        ])
+        top_tfs = _rank_nodes(
+            results,
+            {tf for tf in connected_tfs if "_TF::" in str(tf)} |
+            {_as_tf_node(tf) for tf in connected_tfs},
+            top_tf_n,
+        )
+        receptor_tf_pairs = extract_receptor_tf_pairs(
+            receptor_gene_layer=receptor_tf_df,
+            top_tfs=top_tfs,
+            top_receptors=top_receptors[top_receptors["node"].str.endswith(f"::{downstream_cell}")],
+        )
+        all_receptor_tf_pairs.append(receptor_tf_pairs)
+
+        tf_gene_df = get_celltype_gene_layer(
+            multicell_obj=multicell_obj,
+            cell_type=downstream_cell,
+            layer_name="gene",
+            as_dataframe=True,
+        )
+        tf_nodes, tf_nodes_clean = _tf_name_sets(top_tfs)
+        connected_genes = set(tf_gene_df.loc[
+            tf_gene_df["source"].isin(tf_nodes) |
+            tf_gene_df["source"].isin(tf_nodes_clean),
+            "target"
+        ])
+        top_genes = _rank_nodes(results, connected_genes, top_tf_n)
+        all_gene_tf_pairs.append(_extract_downstream_gene_tf_pairs(tf_gene_df, top_tfs, top_genes))
+
+    receptor_tf_pairs = (
+        pd.concat(all_receptor_tf_pairs, ignore_index=True)
+        if all_receptor_tf_pairs else pd.DataFrame(columns=["receptor", "tf", "weight"])
+    )
+    gene_tf_pairs = (
+        pd.concat(all_gene_tf_pairs, ignore_index=True)
+        if all_gene_tf_pairs else pd.DataFrame(columns=["tf_clean", "gene", "weight"])
+    )
+    return (
+        source_receptor_tf_pairs,
+        source_tf_gene_pairs,
+        ligand_receptor_top,
+        receptor_tf_pairs,
+        gene_tf_pairs,
+    )
 
 
 def get_top_ligands(
@@ -755,6 +1217,7 @@ def extract_receptor_tf_pairs(
             print(filtered_df[['col1', 'col2', 'weight']].head(3).to_string(index=False))
 
     filtered_df = filtered_df.rename(columns={"col2": "receptor", "col1": "tf"})
+    filtered_df.loc[:, "tf_clean"] = filtered_df["tf"].str.replace("_TF", "", regex=False)
     return filtered_df
 
 
@@ -909,6 +1372,20 @@ def build_partial_networks(
        receptor_ligand_df, receptor_tf_df, gene_tf_df)
     """
     direction = _normalize_flow(direction)
+    if direction == "downstream":
+        return _build_downstream_networks(
+            multicell_obj=multicell_obj,
+            results=results,
+            cell_type=cell_type,
+            seeds=seeds,
+            ligand_cells=ligand_cells,
+            top_ligand_n=top_ligand_n,
+            top_receptor_n=top_receptor_n,
+            top_tf_n=top_tf_n,
+            per_celltype=per_celltype,
+            include_before_cells=include_before_cells,
+        )
+
     seeds_prefixed = _seed_names_for_cell_type(seeds, cell_type)
     cc_df = get_cell_communication_layer(
         multicell_obj,
@@ -917,8 +1394,6 @@ def build_partial_networks(
         receptor_cells=[cell_type])
 
     top_ligands = get_top_ligands(results, cc_df, n=top_ligand_n, per_celltype=per_celltype)
-    top_receptors = get_top_receptors(results, cell_type=cell_type, n=top_receptor_n)
-    top_tfs = get_top_tfs(results, cell_type=cell_type, n=top_tf_n)
 
     tf_gene_df = get_celltype_gene_layer(
         multicell_obj=multicell_obj,
@@ -933,9 +1408,11 @@ def build_partial_networks(
         as_dataframe=True
     )
 
-    top_tfs = _include_direct_seed_tfs(top_tfs, tf_gene_df, seeds_prefixed, cell_type)
-    top_receptors = _include_direct_tf_receptors(
-        top_receptors, receptor_tf_df, top_tfs, cell_type
+    top_tfs = _top_seed_connected_tfs(
+        results, tf_gene_df, seeds_prefixed, cell_type, top_tf_n
+    )
+    top_receptors = _top_tf_connected_receptors(
+        results, receptor_tf_df, top_tfs, cell_type, top_receptor_n
     )
 
     receptor_ligand_top = extract_receptor_ligand_pairs(
@@ -964,7 +1441,7 @@ def build_partial_networks(
         )
 
     # Otherwise build full before-cell layers
-    before_cell_types = top_ligands["ligand_celltype"].unique()
+    before_cell_types = _ligand_source_celltypes(top_ligands, cell_type)
     all_before_receptor_tf_pairs = []
     all_before_gene_tf_pairs = []
 
@@ -1021,11 +1498,21 @@ def plot_3layer_sankey(
             "weight": "value"
         })
 
-    r_t = format_links(receptor_tf_df, "receptor", "tf")
+    receptor_tf_col = "tf_clean" if flow == "downstream" and "tf_clean" in receptor_tf_df.columns else "tf"
+    r_t = format_links(receptor_tf_df, "receptor", receptor_tf_col)
     t_g = format_links(gene_tf_df, "tf_clean", "gene")
+    if flow == "downstream":
+        _, r_t, t_g = _normalize_downstream_plot_links(
+            pd.DataFrame(columns=["source", "target", "value"]), r_t, t_g
+        )
 
-    r_t = r_t[r_t["target"].isin(t_g["source"])]
-    t_g = t_g[t_g["source"].isin(r_t["target"])]
+    if len(r_t) > 0 and len(t_g) > 0:
+        r_t = r_t[r_t["target"].isin(t_g["source"])]
+        t_g = t_g[t_g["source"].isin(r_t["target"])]
+
+    if len(r_t) == 0 and len(t_g) == 0:
+        print("Warning: All networks are empty. Cannot generate Sankey plot.")
+        return
 
     r_t["color"] = color
     t_g["color"] = color
@@ -1035,7 +1522,7 @@ def plot_3layer_sankey(
         if total > 0:
             df["value"] /= total
 
-    links = pd.concat([r_t, t_g], ignore_index=True)
+    links = pd.concat([df for df in [r_t, t_g] if len(df) > 0], ignore_index=True)
 
     all_nodes = pd.unique(links[["source", "target"]].values.ravel())
     node_idx = {name: i for i, name in enumerate(all_nodes)}
@@ -1130,13 +1617,6 @@ def plot_4layer_sankey(
     """
     flow = _normalize_flow(flow)
 
-    def format_links(df, source_col, target_col):
-        return df.loc[:, [source_col, target_col, "weight"]].rename(columns={
-            source_col: "source",
-            target_col: "target",
-            "weight": "value"
-        })
-
     def hex_to_rgba(hex_color, alpha=0.6):
         h = hex_color.lstrip("#")
         return f"rgba({int(h[0:2], 16)}, {int(h[2:4], 16)}, {int(h[4:6], 16)}, {alpha})"
@@ -1149,26 +1629,33 @@ def plot_4layer_sankey(
         unique_types = df[column].str.extract(r"::(.+)$")[0].fillna("Unknown")
         return unique_types.apply(lambda ct: hex_to_rgba(string_to_color(ct)))
 
-    l_r = format_links(ligand_receptor_df, "ligand", "receptor_clean")
-    r_t = format_links(receptor_tf_df, "receptor", "tf")
-    t_g = format_links(gene_tf_df, "tf_clean", "gene")
+    l_r = _format_sankey_links(ligand_receptor_df, "ligand", "receptor_clean")
+    receptor_tf_col = "tf_clean" if flow == "downstream" and "tf_clean" in receptor_tf_df.columns else "tf"
+    r_t = _format_sankey_links(receptor_tf_df, "receptor", receptor_tf_col)
+    t_g = _format_sankey_links(gene_tf_df, "tf_clean", "gene")
+    if flow == "downstream":
+        l_r, r_t, t_g = _normalize_downstream_plot_links(l_r, r_t, t_g)
 
     l_r = l_r[l_r["target"].isin(r_t["source"])]
     r_t = r_t[r_t["source"].isin(l_r["target"])]
     t_g = t_g[t_g["source"].isin(r_t["target"])]
 
-    # Only assign colors to non-empty DataFrames
-    if len(l_r) > 0:
-        l_r["color"] = assign_group_colors(l_r, "source")
-    if len(r_t) > 0:
-        r_t["color"] = "rgba(100,200,100,1)"
-    if len(t_g) > 0:
-        t_g["color"] = "rgba(100,200,100,1)"
+    if flow == "downstream":
+        if len(l_r) > 0:
+            l_r.loc[:, "color"] = assign_group_colors(l_r, "source")
+        if len(r_t) > 0:
+            r_t.loc[:, "color"] = assign_group_colors(r_t, "source")
+        if len(t_g) > 0:
+            t_g.loc[:, "color"] = assign_group_colors(t_g, "source")
+    else:
+        if len(l_r) > 0:
+            l_r["color"] = assign_group_colors(l_r, "source")
+        if len(r_t) > 0:
+            r_t["color"] = "rgba(100,200,100,1)"
+        if len(t_g) > 0:
+            t_g["color"] = "rgba(100,200,100,1)"
 
-    for df in [l_r, r_t, t_g]:
-        total = df["value"].sum()
-        if total > 0:
-            df["value"] /= total
+    _normalize_link_values([l_r, r_t, t_g], flow)
 
     # Filter out empty DataFrames
     non_empty_dfs = [df for df in [l_r, r_t, t_g] if len(df) > 0]
@@ -1177,25 +1664,38 @@ def plot_4layer_sankey(
         print("Warning: All networks are empty. Cannot generate Sankey plot.")
         return
     
-    links = pd.concat(non_empty_dfs, ignore_index=True)
-
-    all_nodes = pd.unique(links[["source", "target"]].values.ravel())
-    node_idx = {name: i for i, name in enumerate(all_nodes)}
-    links["source_idx"] = links["source"].map(node_idx)
-    links["target_idx"] = links["target"].map(node_idx)
-
     def _format_label(x: str) -> str:
         parts = x.split("::", 1)
         return parts[0] if len(parts) == 2 else x
 
-    labels = [_format_label(n) for n in all_nodes]
+    if flow == "downstream":
+        links, raw_labels, node_x, node_y = _build_layered_links(
+            [
+                (l_r, "ligand", "receptor"),
+                (r_t, "receptor", "tf"),
+                (t_g, "tf", "gene"),
+            ],
+            {"ligand": 0.0, "receptor": 0.33, "tf": 0.66, "gene": 1.0},
+        )
+        labels = [_format_label(n) for n in raw_labels]
+        node_extra = {"x": node_x, "y": node_y}
+    else:
+        links = pd.concat(non_empty_dfs, ignore_index=True)
+        all_nodes = pd.unique(links[["source", "target"]].values.ravel())
+        node_idx = {name: i for i, name in enumerate(all_nodes)}
+        links["source_idx"] = links["source"].map(node_idx)
+        links["target_idx"] = links["target"].map(node_idx)
+        labels = [_format_label(n) for n in all_nodes]
+        node_extra = {}
 
     sankey_data = go.Sankey(
+        arrangement="fixed" if flow == "downstream" else "snap",
         node=dict(
             pad=15,
             thickness=20,
             line=dict(color="black", width=0.5),
-            label=labels
+            label=labels,
+            **node_extra,
         ),
         link=dict(
             source=links["source_idx"],
@@ -1267,13 +1767,6 @@ def plot_6layer_sankey(
 ):
     flow = _normalize_flow(flow)
 
-    def format_links(df, source_col, target_col):
-        return df.loc[:, [source_col, target_col, "weight"]].rename(columns={
-            source_col: "source",
-            target_col: "target",
-            "weight": "value"
-        })
-
     def hex_to_rgba(hex_color, alpha=0.6):
         h = hex_color.lstrip("#")
         return f"rgba({int(h[0:2], 16)}, {int(h[2:4], 16)}, {int(h[4:6], 16)}, {alpha})"
@@ -1282,44 +1775,44 @@ def plot_6layer_sankey(
         h = hashlib.md5(string.encode()).hexdigest()
         return "#" + h[:6]
 
-    # Format all links
-    br_bt = format_links(before_receptor_tf_df, "receptor", "tf")
-    bt_l = format_links(before_tf_ligand_df, "tf_clean", "gene")
-    l_r = format_links(ligand_receptor_df, "ligand", "receptor_clean")
-    r_t = format_links(receptor_tf_df, "receptor", "tf")
-    t_g = format_links(gene_tf_df, "tf_clean", "gene")
-
-    # Filter unconnected
-    l_r = l_r[l_r["target"].isin(r_t["source"])]
-    l_r = l_r[l_r["source"].isin(bt_l["target"])]
-    r_t = r_t[r_t["source"].isin(l_r["target"])]
-    t_g = t_g[t_g["source"].isin(r_t["target"])]
-    bt_l = bt_l[bt_l["target"].isin(l_r["source"])]
-    bt_l = bt_l[bt_l["source"].isin(br_bt["target"])]
-    l_r = l_r[l_r["source"].isin(bt_l["target"])]
-    br_bt = br_bt[br_bt["target"].isin(bt_l["source"])]
+    br_bt, bt_l, l_r, r_t, t_g = _prepare_6layer_links(
+        before_receptor_tf_df,
+        before_tf_ligand_df,
+        ligand_receptor_df,
+        receptor_tf_df,
+        gene_tf_df,
+        flow,
+    )
 
     # Assign colors by celltype
     def assign_group_colors(df, column):
         unique_types = df[column].str.extract(r"::(.+)$")[0].fillna("Unknown")
         return unique_types.apply(lambda ct: hex_to_rgba(string_to_color(ct)))
 
-    # Only assign colors to non-empty DataFrames
-    if len(br_bt) > 0:
-        br_bt.loc[:, "color"] = assign_group_colors(br_bt, "source")
-    if len(bt_l) > 0:
-        bt_l.loc[:, "color"] = assign_group_colors(bt_l, "source")
-    if len(l_r) > 0:
-        l_r.loc[:, "color"] = "rgba(160,160,160,0.4)"
-    if len(r_t) > 0:
-        r_t.loc[:, "color"] = "rgba(100,200,100,1)"
-    if len(t_g) > 0:
-        t_g.loc[:, "color"] = "rgba(100,200,100,1)"
+    if flow == "downstream":
+        if len(br_bt) > 0:
+            br_bt.loc[:, "color"] = assign_group_colors(br_bt, "source")
+        if len(bt_l) > 0:
+            bt_l.loc[:, "color"] = assign_group_colors(bt_l, "target")
+        if len(l_r) > 0:
+            l_r.loc[:, "color"] = assign_group_colors(l_r, "source")
+        if len(r_t) > 0:
+            r_t.loc[:, "color"] = assign_group_colors(r_t, "source")
+        if len(t_g) > 0:
+            t_g.loc[:, "color"] = assign_group_colors(t_g, "source")
+    else:
+        if len(br_bt) > 0:
+            br_bt.loc[:, "color"] = assign_group_colors(br_bt, "source")
+        if len(bt_l) > 0:
+            bt_l.loc[:, "color"] = assign_group_colors(bt_l, "source")
+        if len(l_r) > 0:
+            l_r.loc[:, "color"] = "rgba(160,160,160,0.4)"
+        if len(r_t) > 0:
+            r_t.loc[:, "color"] = "rgba(100,200,100,1)"
+        if len(t_g) > 0:
+            t_g.loc[:, "color"] = "rgba(100,200,100,1)"
 
-    for df in [br_bt, bt_l, l_r, r_t, t_g]:
-        total = df["value"].sum()
-        if total > 0:
-            df["value"] /= total
+    _normalize_link_values([br_bt, bt_l, l_r, r_t, t_g], flow)
 
     # Filter out empty DataFrames before concatenation
     non_empty_dfs = [df for df in [br_bt, bt_l, l_r, r_t, t_g] if len(df) > 0]
@@ -1328,25 +1821,47 @@ def plot_6layer_sankey(
         print("Warning: All networks are empty. Cannot generate Sankey plot.")
         return
     
-    links = pd.concat(non_empty_dfs, ignore_index=True)
-
-    all_nodes = pd.unique(links[["source", "target"]].values.ravel())
-    node_idx = {name: i for i, name in enumerate(all_nodes)}
-    links.loc[:, "source_idx"] = links.loc[:, "source"].map(node_idx)
-    links.loc[:, "target_idx"] = links.loc[:, "target"].map(node_idx)
-
     def _format_label(x: str) -> str:
         parts = x.split("::", 1)
         return parts[0].split("_")[0] if len(parts) == 2 else x
 
-    labels = [_format_label(n) for n in all_nodes]
+    if flow == "downstream":
+        links, raw_labels, node_x, node_y = _build_layered_links(
+            [
+                (br_bt, "sender_receptor", "sender_tf"),
+                (bt_l, "sender_tf", "ligand"),
+                (l_r, "ligand", "receiver_receptor"),
+                (r_t, "receiver_receptor", "receiver_tf"),
+                (t_g, "receiver_tf", "gene"),
+            ],
+            {
+                "sender_receptor": 0.0,
+                "sender_tf": 0.2,
+                "ligand": 0.4,
+                "receiver_receptor": 0.6,
+                "receiver_tf": 0.8,
+                "gene": 1.0,
+            },
+        )
+        labels = [_format_label(n) for n in raw_labels]
+        node_extra = {"x": node_x, "y": node_y}
+    else:
+        links = pd.concat(non_empty_dfs, ignore_index=True)
+        all_nodes = pd.unique(links[["source", "target"]].values.ravel())
+        node_idx = {name: i for i, name in enumerate(all_nodes)}
+        links.loc[:, "source_idx"] = links.loc[:, "source"].map(node_idx)
+        links.loc[:, "target_idx"] = links.loc[:, "target"].map(node_idx)
+        labels = [_format_label(n) for n in all_nodes]
+        node_extra = {}
 
     sankey_data = go.Sankey(
+        arrangement="fixed" if flow == "downstream" else "snap",
         node=dict(
             pad=15,
             thickness=20,
             line=dict(color="black", width=0.5),
             label=labels,
+            **node_extra,
         ),
         link=dict(
             source=links.loc[:, "source_idx"],
@@ -1360,7 +1875,7 @@ def plot_6layer_sankey(
     fig = go.Figure(data=[sankey_data])
 
     color_map = (
-        pd.concat([br_bt, bt_l, r_t, t_g]).loc[:, ["source", "color"]]
+        pd.concat([br_bt, bt_l, l_r, r_t, t_g]).loc[:, ["source", "color"]]
         .dropna()
         .drop_duplicates()
     )
@@ -1652,12 +2167,25 @@ def plot_intercell_sankey(
         "gene_tf": networks[4],
     }
 
-    plot_6layer_sankey(
-        before_receptor_tf_df=networks["before_receptor_tf"],
-        before_tf_ligand_df=networks["before_tf_ligand"],
-        ligand_receptor_df=networks["ligand_receptor"],
-        receptor_tf_df=networks["receptor_tf"],
-        gene_tf_df=networks["gene_tf"],
-        flow=flow,
-        save_path=save_path
-    )
+    if (
+        flow == "downstream"
+        and len(networks["before_receptor_tf"]) == 0
+        and len(networks["before_tf_ligand"]) == 0
+    ):
+        plot_4layer_sankey(
+            ligand_receptor_df=networks["ligand_receptor"],
+            receptor_tf_df=networks["receptor_tf"],
+            gene_tf_df=networks["gene_tf"],
+            flow=flow,
+            save_path=save_path
+        )
+    else:
+        plot_6layer_sankey(
+            before_receptor_tf_df=networks["before_receptor_tf"],
+            before_tf_ligand_df=networks["before_tf_ligand"],
+            ligand_receptor_df=networks["ligand_receptor"],
+            receptor_tf_df=networks["receptor_tf"],
+            gene_tf_df=networks["gene_tf"],
+            flow=flow,
+            save_path=save_path
+        )

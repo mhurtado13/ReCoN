@@ -94,6 +94,7 @@ def cascade_plot(
         top_ligand_n=top_ligand_n, top_receptor_n=top_receptor_n,
         top_tf_n=top_tf_n, before_top_n=before_top_n,
         per_celltype=per_celltype, verbose=verbose,
+        flow=flow,
     )
 
     # ── 2. Collect node sets ────────────────────────────────────────────
@@ -310,7 +311,7 @@ def contrast_cascade_plot(
         cell_type=cell_type, seeds=seeds, ligand_cells=ligand_cells,
         top_ligand_n=top_ligand_n, top_receptor_n=top_receptor_n,
         top_tf_n=top_tf_n, before_top_n=before_top_n,
-        per_celltype=per_celltype, verbose=verbose,
+        per_celltype=per_celltype, verbose=verbose, flow=flow,
     )
 
     # ── 3. Collect node sets ────────────────────────────────────────────

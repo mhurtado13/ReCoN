@@ -681,35 +681,647 @@ class TestSankeyPlotRendering:
             flow="downstream",
         )
 
-        assert captured["labels"] == ["REC1_receptor", "TF1_TF", "SEED"]
+        assert captured["labels"] == ["REC1_receptor", "TF1", "SEED"]
         assert captured["source"] == [0, 1]
         assert captured["target"] == [1, 2]
 
-    def test_direct_seed_tfs_and_receptors_are_included(self):
-        """Seed genes pull immediate upstream TFs/receptors even if absent from top ranks."""
+    def test_top_tfs_and_receptors_are_ranked_within_seed_neighborhood(self):
+        """TFs/receptors are top-ranked after restricting to seed-connected nodes."""
+        results = pd.DataFrame({
+            "multiplex": [
+                "CellA_grn",
+                "CellA_grn",
+                "CellA_grn",
+                "CellA_receptor",
+                "CellA_receptor",
+            ],
+            "node": [
+                "UNCONNECTED_TF::CellA",
+                "CONNECTED_LOW_TF::CellA",
+                "CONNECTED_HIGH_TF::CellA",
+                "UNCONNECTED_REC_receptor::CellA",
+                "CONNECTED_REC_receptor::CellA",
+            ],
+            "score": [10.0, 1.0, 5.0, 10.0, 2.0],
+        })
         tf_gene_layer = pd.DataFrame({
-            "source": ["DIRECT_TF::CellA"],
-            "target": ["SEED::CellA"],
-            "weight": [1.0],
+            "source": ["CONNECTED_LOW_TF::CellA", "CONNECTED_HIGH_TF::CellA"],
+            "target": ["SEED::CellA", "SEED::CellA"],
+            "weight": [1.0, 1.0],
         })
         receptor_tf_layer = pd.DataFrame({
-            "col1": ["DIRECT_TF::CellA"],
-            "col2": ["DIRECT_REC_receptor::CellA"],
-            "weight": [1.0],
+            "col1": ["CONNECTED_HIGH_TF::CellA", "UNCONNECTED_TF::CellA"],
+            "col2": ["CONNECTED_REC_receptor::CellA", "UNCONNECTED_REC_receptor::CellA"],
+            "weight": [1.0, 1.0],
         })
 
-        top_tfs = sankey_paths._include_direct_seed_tfs(
-            pd.DataFrame(columns=["multiplex", "node", "score"]),
+        top_tfs = sankey_paths._top_seed_connected_tfs(
+            results,
             tf_gene_layer,
             pd.Series(["SEED::CellA"]),
             "CellA",
+            n=1,
         )
-        top_receptors = sankey_paths._include_direct_tf_receptors(
-            pd.DataFrame(columns=["multiplex", "node", "score"]),
+        top_receptors = sankey_paths._top_tf_connected_receptors(
+            results,
             receptor_tf_layer,
             top_tfs,
             "CellA",
+            n=1,
         )
 
-        assert top_tfs["node"].tolist() == ["DIRECT_TF::CellA"]
-        assert top_receptors["node"].tolist() == ["DIRECT_REC_receptor::CellA"]
+        assert top_tfs["node"].tolist() == ["CONNECTED_HIGH_TF::CellA"]
+        assert top_receptors["node"].tolist() == ["CONNECTED_REC_receptor::CellA"]
+
+    def test_receiver_celltype_is_excluded_from_sender_layers(self):
+        top_ligands = pd.DataFrame({
+            "ligand_celltype": ["CellA", "CellB", "CellA", "CellC"],
+        })
+
+        result = sankey_paths._ligand_source_celltypes(top_ligands, "CellA")
+
+        assert result == ["CellB", "CellC"]
+
+    def test_downstream_plain_gene_seed_has_no_intracellular_network(self):
+        class MockMulticell:
+            pass
+
+        multicell = MockMulticell()
+        multicell.celltypes_names = ["CellA", "CellB"]
+        multicell.multiplexes = {
+            "CellA_grn": {
+                "names": ["gene"],
+                "layers": [pd.DataFrame({
+                    "source": ["TF1_TF::CellA"],
+                    "target": ["LIG1::CellA"],
+                    "weight": [1.0],
+                })],
+            },
+            "cell_communication": {
+                "layers": [pd.DataFrame({
+                    "source": ["LIG1-CellA"],
+                    "target": ["RECB-CellB"],
+                    "weight": [1.0],
+                    "celltype_source": ["CellA"],
+                    "celltype_target": ["CellB"],
+                    "network_key": ["cell_communication"],
+                })],
+            },
+        }
+        multicell.bipartites = {
+            "CellA_grn-CellA_receptor": {
+                "edge_list_df": pd.DataFrame({
+                    "col1": ["TF1_TF::CellA"],
+                    "col2": ["RECA_receptor::CellA"],
+                    "weight": [1.0],
+                }),
+            },
+        }
+        results = pd.DataFrame({
+            "multiplex": ["CellA_grn", "cell_communication"],
+            "node": ["TF1_TF::CellA", "LIG1::CellA"],
+            "score": [2.0, 1.0],
+        })
+
+        networks = sankey_paths.build_partial_networks(
+            multicell,
+            results,
+            cell_type="CellA",
+            seeds=["LIG1"],
+            ligand_cells=[],
+            include_before_cells=False,
+            direction="downstream",
+        )
+
+        assert all(len(network) == 0 for network in networks[2:5])
+
+    def test_downstream_intercell_starts_from_source_tf_to_receiver_cells(self):
+        class MockMulticell:
+            pass
+
+        multicell = MockMulticell()
+        multicell.celltypes_names = ["CellA", "CellB"]
+        multicell.multiplexes = {
+            "CellA_grn": {
+                "names": ["gene"],
+                "layers": [pd.DataFrame({
+                    "source": ["TF1_TF::CellA"],
+                    "target": ["LIG1::CellA"],
+                    "weight": [1.0],
+                })],
+            },
+            "CellB_grn": {
+                "names": ["gene"],
+                "layers": [pd.DataFrame({
+                    "source": ["TFB_TF::CellB"],
+                    "target": ["GENEB::CellB"],
+                    "weight": [1.0],
+                })],
+            },
+            "cell_communication": {
+                "layers": [pd.DataFrame({
+                    "source": ["LIG1-CellA"],
+                    "target": ["RECB-CellB"],
+                    "weight": [1.0],
+                    "celltype_source": ["CellA"],
+                    "celltype_target": ["CellB"],
+                    "network_key": ["cell_communication"],
+                })],
+            },
+        }
+        multicell.bipartites = {
+            "CellA_grn-CellA_receptor": {
+                "edge_list_df": pd.DataFrame({
+                    "col1": ["TF1_TF::CellA"],
+                    "col2": ["RECA_receptor::CellA"],
+                    "weight": [1.0],
+                }),
+            },
+            "CellB_grn-CellB_receptor": {
+                "edge_list_df": pd.DataFrame({
+                    "col1": ["TFB_TF::CellB"],
+                    "col2": ["RECB_receptor::CellB"],
+                    "weight": [1.0],
+                }),
+            },
+        }
+        results = pd.DataFrame({
+            "multiplex": [
+                "CellA_grn",
+                "cell_communication",
+                "CellB_receptor",
+                "CellB_grn",
+                "CellB_grn",
+            ],
+            "node": [
+                "TF1_TF::CellA",
+                "LIG1::CellA",
+                "RECB_receptor::CellB",
+                "TFB_TF::CellB",
+                "GENEB::CellB",
+            ],
+            "score": [5.0, 4.0, 3.0, 2.0, 1.0],
+        })
+
+        networks = sankey_paths.build_partial_networks(
+            multicell,
+            results,
+            cell_type="CellA",
+            seeds=["TF1_TF"],
+            ligand_cells=["CellB"],
+            include_before_cells=True,
+            direction="downstream",
+        )
+
+        assert networks[1]["gene"].tolist() == ["LIG1::CellA"]
+        assert networks[2]["ligand"].tolist() == ["LIG1::CellA"]
+        assert networks[3]["receptor"].tolist() == ["RECB_receptor::CellB"]
+        assert networks[4]["gene"].tolist() == ["GENEB::CellB"]
+
+    def test_downstream_intercell_from_ligand_gene_seed_keeps_network(self):
+        class MockMulticell:
+            pass
+
+        multicell = MockMulticell()
+        multicell.celltypes_names = ["CellA", "CellB"]
+        multicell.multiplexes = {
+            "CellA_grn": {
+                "names": ["gene"],
+                "layers": [pd.DataFrame({
+                    "source": ["TF1_TF::CellA"],
+                    "target": ["LIG1::CellA"],
+                    "weight": [1.0],
+                })],
+            },
+            "CellB_grn": {
+                "names": ["gene"],
+                "layers": [pd.DataFrame({
+                    "source": ["TFB_TF::CellB"],
+                    "target": ["GENEB::CellB"],
+                    "weight": [1.0],
+                })],
+            },
+            "cell_communication": {
+                "layers": [pd.DataFrame({
+                    "source": ["LIG1-CellA"],
+                    "target": ["RECB-CellB"],
+                    "weight": [1.0],
+                    "celltype_source": ["CellA"],
+                    "celltype_target": ["CellB"],
+                    "network_key": ["cell_communication"],
+                })],
+            },
+        }
+        multicell.bipartites = {
+            "CellA_grn-CellA_receptor": {
+                "edge_list_df": pd.DataFrame({
+                    "col1": ["TF1_TF::CellA"],
+                    "col2": ["RECA_receptor::CellA"],
+                    "weight": [1.0],
+                }),
+            },
+            "CellB_grn-CellB_receptor": {
+                "edge_list_df": pd.DataFrame({
+                    "col1": ["TFB_TF::CellB"],
+                    "col2": ["RECB_receptor::CellB"],
+                    "weight": [1.0],
+                }),
+            },
+        }
+        results = pd.DataFrame({
+            "multiplex": ["cell_communication", "CellB_receptor", "CellB_grn", "CellB_grn"],
+            "node": ["LIG1-CellA", "RECB_receptor::CellB", "TFB_TF::CellB", "GENEB::CellB"],
+            "score": [4.0, 3.0, 2.0, 1.0],
+        })
+
+        networks = sankey_paths.build_partial_networks(
+            multicell,
+            results,
+            cell_type="CellA",
+            seeds=["LIG1"],
+            ligand_cells=["CellB"],
+            include_before_cells=True,
+            direction="downstream",
+        )
+
+        assert networks[2]["ligand"].tolist() == ["LIG1::CellA"]
+        assert networks[3]["receptor"].tolist() == ["RECB_receptor::CellB"]
+        assert networks[4]["gene"].tolist() == ["GENEB::CellB"]
+
+    def test_downstream_receptor_targets_are_filtered_to_ranked_tfs(self):
+        class MockMulticell:
+            pass
+
+        multicell = MockMulticell()
+        multicell.celltypes_names = ["CellA", "CellB"]
+        multicell.multiplexes = {
+            "CellA_grn": {
+                "names": ["gene"],
+                "layers": [pd.DataFrame({
+                    "source": ["TF1_TF::CellA"],
+                    "target": ["LIG1::CellA"],
+                    "weight": [1.0],
+                })],
+            },
+            "CellB_grn": {
+                "names": ["gene"],
+                "layers": [pd.DataFrame({
+                    "source": ["TFB::CellB"],
+                    "target": ["GENEB::CellB"],
+                    "weight": [1.0],
+                })],
+            },
+            "cell_communication": {
+                "layers": [pd.DataFrame({
+                    "source": ["LIG1-CellA", "LIG1-CellA"],
+                    "target": ["RECB-CellB", "BADREC-CellB"],
+                    "weight": [1.0, 1.0],
+                    "celltype_source": ["CellA", "CellA"],
+                    "celltype_target": ["CellB", "CellB"],
+                    "network_key": ["cell_communication", "cell_communication"],
+                })],
+            },
+        }
+        multicell.bipartites = {
+            "CellA_grn-CellA_receptor": {
+                "edge_list_df": pd.DataFrame({
+                    "col1": ["TF1_TF::CellA"],
+                    "col2": ["RECA_receptor::CellA"],
+                    "weight": [1.0],
+                }),
+            },
+            "CellB_grn-CellB_receptor": {
+                "edge_list_df": pd.DataFrame({
+                    "col1": ["TFB::CellB", "Ccl3::CellB"],
+                    "col2": ["RECB_receptor::CellB", "BADREC_receptor::CellB"],
+                    "weight": [1.0, 1.0],
+                }),
+            },
+        }
+        results = pd.DataFrame({
+            "multiplex": [
+                "cell_communication",
+                "CellB_receptor",
+                "CellB_receptor",
+                "CellB_grn",
+                "CellB_grn",
+                "CellB_grn",
+            ],
+            "node": [
+                "LIG1-CellA",
+                "RECB_receptor::CellB",
+                "BADREC_receptor::CellB",
+                "TFB_TF::CellB",
+                "GENEB::CellB",
+                "Ccl3::CellB",
+            ],
+            "score": [6.0, 5.0, 4.0, 3.0, 2.0, 10.0],
+        })
+
+        networks = sankey_paths.build_partial_networks(
+            multicell,
+            results,
+            cell_type="CellA",
+            seeds=["LIG1"],
+            ligand_cells=["CellB"],
+            include_before_cells=True,
+            direction="downstream",
+        )
+
+        assert networks[2]["receptor"].tolist() == ["RECB::CellB"]
+        assert networks[3]["tf"].tolist() == ["TFB::CellB"]
+        assert networks[4]["gene"].tolist() == ["GENEB::CellB"]
+
+    def test_downstream_per_celltype_balances_downstream_receptors(self):
+        class MockMulticell:
+            pass
+
+        multicell = MockMulticell()
+        multicell.celltypes_names = ["CellA", "CellB", "CellC"]
+        multicell.multiplexes = {
+            "CellA_grn": {
+                "names": ["gene"],
+                "layers": [pd.DataFrame({
+                    "source": ["TF1_TF::CellA"],
+                    "target": ["LIG1::CellA"],
+                    "weight": [1.0],
+                })],
+            },
+            "CellB_grn": {
+                "names": ["gene"],
+                "layers": [pd.DataFrame({
+                    "source": ["TFB::CellB"],
+                    "target": ["GENEB::CellB"],
+                    "weight": [1.0],
+                })],
+            },
+            "CellC_grn": {
+                "names": ["gene"],
+                "layers": [pd.DataFrame({
+                    "source": ["TFC::CellC"],
+                    "target": ["GENEC::CellC"],
+                    "weight": [1.0],
+                })],
+            },
+            "cell_communication": {
+                "layers": [pd.DataFrame({
+                    "source": ["LIG1-CellA", "LIG1-CellA"],
+                    "target": ["RECB-CellB", "RECC-CellC"],
+                    "weight": [1.0, 1.0],
+                    "celltype_source": ["CellA", "CellA"],
+                    "celltype_target": ["CellB", "CellC"],
+                    "network_key": ["cell_communication", "cell_communication"],
+                })],
+            },
+        }
+        multicell.bipartites = {
+            "CellA_grn-CellA_receptor": {
+                "edge_list_df": pd.DataFrame({
+                    "col1": ["TF1_TF::CellA"],
+                    "col2": ["RECA_receptor::CellA"],
+                    "weight": [1.0],
+                }),
+            },
+            "CellB_grn-CellB_receptor": {
+                "edge_list_df": pd.DataFrame({
+                    "col1": ["TFB::CellB"],
+                    "col2": ["RECB_receptor::CellB"],
+                    "weight": [1.0],
+                }),
+            },
+            "CellC_grn-CellC_receptor": {
+                "edge_list_df": pd.DataFrame({
+                    "col1": ["TFC::CellC"],
+                    "col2": ["RECC_receptor::CellC"],
+                    "weight": [1.0],
+                }),
+            },
+        }
+        results = pd.DataFrame({
+            "multiplex": [
+                "cell_communication",
+                "CellB_receptor",
+                "CellC_receptor",
+                "CellB_grn",
+                "CellC_grn",
+                "CellB_grn",
+                "CellC_grn",
+            ],
+            "node": [
+                "LIG1-CellA",
+                "RECB_receptor::CellB",
+                "RECC_receptor::CellC",
+                "TFB_TF::CellB",
+                "TFC_TF::CellC",
+                "GENEB::CellB",
+                "GENEC::CellC",
+            ],
+            "score": [10.0, 9.0, 1.0, 8.0, 7.0, 6.0, 5.0],
+        })
+
+        balanced = sankey_paths.build_partial_networks(
+            multicell,
+            results,
+            cell_type="CellA",
+            seeds=["LIG1"],
+            ligand_cells=["CellB", "CellC"],
+            top_receptor_n=1,
+            include_before_cells=True,
+            direction="downstream",
+            per_celltype=True,
+        )
+        global_top = sankey_paths.build_partial_networks(
+            multicell,
+            results,
+            cell_type="CellA",
+            seeds=["LIG1"],
+            ligand_cells=["CellB", "CellC"],
+            top_receptor_n=1,
+            include_before_cells=True,
+            direction="downstream",
+            per_celltype=False,
+        )
+
+        assert set(balanced[2]["receptor"]) == {"RECB::CellB", "RECC::CellC"}
+        assert global_top[2]["receptor"].tolist() == ["RECB::CellB"]
+
+    def test_disconnected_source_receptors_are_not_plotted(self):
+        br_bt = pd.DataFrame({
+            "source": ["REC_FLOAT::CellA", "REC_OK::CellA"],
+            "target": ["TF_FLOAT::CellA", "TF_OK::CellA"],
+            "value": [1.0, 1.0],
+        })
+        bt_l = pd.DataFrame({
+            "source": ["TF_OK::CellA"],
+            "target": ["LIG1::CellA"],
+            "value": [1.0],
+        })
+        l_r = pd.DataFrame({
+            "source": ["LIG1::CellA"],
+            "target": ["RECB::CellB"],
+            "value": [1.0],
+        })
+        r_t = pd.DataFrame({
+            "source": ["RECB::CellB"],
+            "target": ["TFB::CellB"],
+            "value": [1.0],
+        })
+        t_g = pd.DataFrame({
+            "source": ["TFB::CellB"],
+            "target": ["GENEB::CellB"],
+            "value": [1.0],
+        })
+
+        filtered = sankey_paths._filter_connected_sankey_layers(br_bt, bt_l, l_r, r_t, t_g)
+
+        assert filtered[0]["source"].tolist() == ["REC_OK::CellA"]
+
+    def test_ligand_seed_path_survives_without_left_layers(self):
+        empty = pd.DataFrame(columns=["source", "target", "value"])
+        l_r = pd.DataFrame({
+            "source": ["LIG1::CellA"],
+            "target": ["RECB::CellB"],
+            "value": [1.0],
+        })
+        r_t = pd.DataFrame({
+            "source": ["RECB::CellB"],
+            "target": ["TFB::CellB"],
+            "value": [1.0],
+        })
+        t_g = pd.DataFrame({
+            "source": ["TFB::CellB"],
+            "target": ["GENEB::CellB"],
+            "value": [1.0],
+        })
+
+        filtered = sankey_paths._filter_connected_sankey_layers(empty, empty, l_r, r_t, t_g)
+
+        assert filtered[2]["source"].tolist() == ["LIG1::CellA"]
+        assert filtered[3]["source"].tolist() == ["RECB::CellB"]
+        assert filtered[4]["target"].tolist() == ["GENEB::CellB"]
+
+    def test_downstream_plot_links_normalize_receptor_and_tf_names(self):
+        l_r = pd.DataFrame({
+            "source": ["LIG1::CellA"],
+            "target": ["RECB::CellB"],
+            "value": [1.0],
+        })
+        r_t = pd.DataFrame({
+            "source": ["RECB_receptor::CellB"],
+            "target": ["TFB_TF::CellB"],
+            "value": [1.0],
+        })
+        t_g = pd.DataFrame({
+            "source": ["TFB::CellB"],
+            "target": ["GENEB::CellB"],
+            "value": [1.0],
+        })
+
+        l_r, r_t, t_g = sankey_paths._normalize_downstream_plot_links(l_r, r_t, t_g)
+        filtered = sankey_paths._filter_connected_sankey_layers(
+            pd.DataFrame(columns=["source", "target", "value"]),
+            pd.DataFrame(columns=["source", "target", "value"]),
+            l_r,
+            r_t,
+            t_g,
+        )
+
+        assert [len(layer) for layer in filtered] == [0, 0, 1, 1, 1]
+        assert filtered[2]["target"].tolist() == ["RECB_receptor::CellB"]
+        assert filtered[3]["target"].tolist() == ["TFB::CellB"]
+
+    def test_downstream_4layer_plot_uses_fixed_layers_and_normalized_values(self, monkeypatch):
+        captured = {}
+
+        class FakeFigure:
+            def __init__(self, data=None):
+                captured["data"] = data
+
+            def update_layout(self, **kwargs):
+                pass
+
+            def add_annotation(self, **kwargs):
+                pass
+
+            def show(self):
+                pass
+
+            def write_html(self, path):
+                pass
+
+        monkeypatch.setattr(sankey_paths.go, "Figure", FakeFigure)
+
+        sankey_paths.plot_4layer_sankey(
+            ligand_receptor_df=pd.DataFrame({
+                "ligand": ["LIG1::Macrophage", "LIG2::Macrophage"],
+                "receptor": ["RECB::B_cell", "RECC::T_cell"],
+                "receptor_clean": ["RECB_receptor::B_cell", "RECC_receptor::T_cell"],
+                "weight": [5.0, 2.0],
+            }),
+            receptor_tf_df=pd.DataFrame({
+                "receptor": ["RECB_receptor::B_cell", "RECC_receptor::T_cell"],
+                "tf": ["TFB::B_cell", "TFC::T_cell"],
+                "tf_clean": ["TFB::B_cell", "TFC::T_cell"],
+                "weight": [4.0, 3.0],
+            }),
+            gene_tf_df=pd.DataFrame({
+                "tf_clean": ["TFB::B_cell", "TFC::T_cell"],
+                "gene": ["GENEB::B_cell", "GENEC::T_cell"],
+                "weight": [8.0, 6.0],
+            }),
+            flow="downstream",
+        )
+
+        trace = captured["data"][0]
+        assert trace.arrangement == "fixed"
+        assert set(trace.node.x) == {0.0, 0.33, 0.66, 1.0}
+        assert max(trace.link.value) <= 1.0
+        assert abs(sum(trace.link.value[:2]) - 1.0) < 1e-9
+
+    def test_downstream_intercell_gene_seed_uses_4layer_plot(self, monkeypatch):
+        networks = (
+            pd.DataFrame(columns=["receptor", "tf", "weight"]),
+            pd.DataFrame(columns=["tf_clean", "gene", "weight"]),
+            pd.DataFrame({
+                "ligand": ["LIG1::CellA"],
+                "receptor": ["RECB::CellB"],
+                "receptor_clean": ["RECB_receptor::CellB"],
+                "weight": [1.0],
+            }),
+            pd.DataFrame({
+                "receptor": ["RECB_receptor::CellB"],
+                "tf": ["TFB::CellB"],
+                "tf_clean": ["TFB::CellB"],
+                "weight": [1.0],
+            }),
+            pd.DataFrame({
+                "tf": ["TFB::CellB"],
+                "tf_clean": ["TFB::CellB"],
+                "gene": ["GENEB::CellB"],
+                "weight": [1.0],
+            }),
+        )
+        calls = []
+
+        monkeypatch.setattr(sankey_paths, "build_partial_networks", lambda **kwargs: networks)
+        monkeypatch.setattr(
+            sankey_paths,
+            "plot_4layer_sankey",
+            lambda **kwargs: calls.append(("4layer", kwargs)),
+        )
+        monkeypatch.setattr(
+            sankey_paths,
+            "plot_6layer_sankey",
+            lambda **kwargs: calls.append(("6layer", kwargs)),
+        )
+
+        sankey_paths.plot_intercell_sankey(
+            multicell_obj=object(),
+            results=pd.DataFrame(),
+            cell_type="CellA",
+            seeds=["LIG1"],
+            ligand_cells=["CellB"],
+            flow="downstream",
+        )
+
+        assert [call[0] for call in calls] == ["4layer"]

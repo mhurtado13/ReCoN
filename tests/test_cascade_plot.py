@@ -46,7 +46,7 @@ class TestCascadeFlow:
         assert captured[0] == [(0.0, 0.0), (1.0, 0.0)]
         plt.close("all")
 
-    def test_draw_single_edge_downstream_direction(self, monkeypatch):
+    def test_draw_single_edge_downstream_keeps_topology_direction(self, monkeypatch):
         captured = []
 
         def mock_add_patch(patch):
@@ -72,7 +72,7 @@ class TestCascadeFlow:
             flow="downstream",
         )
 
-        assert captured[0] == [(1.0, 0.0), (0.0, 0.0)]
+        assert captured[0] == [(0.0, 0.0), (1.0, 0.0)]
         plt.close("all")
 
     def test_invalid_flow_raises(self):
