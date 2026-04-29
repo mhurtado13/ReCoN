@@ -6,13 +6,18 @@ Tests the receptor gene loading functionality.
 
 import pytest
 import pandas as pd
+import importlib
 from recon.data.load_data import (
+    TUTORIAL_DATA_REGISTRY,
     download_tutorial,
+    fetch_all_tutorial_data,
     fetch_tutorial_data,
     load_receptor_genes,
     receptor_gene_resources,
 )
 import os
+
+load_data_module = importlib.import_module("recon.data.load_data")
 
 
 class TestReceptorGeneResources:
@@ -166,7 +171,82 @@ class TestDataIntegration:
 class TestFetchTutorialData:
     """Test fetch_tutorial_data function with the smallest file."""
 
-    def test_fetch_smallest_file(self, tmp_path):
+    def test_unknown_tutorial_file_raises_value_error(self):
+        """Role: reject tutorial filenames that are not in the registry."""
+        with pytest.raises(ValueError, match="Unknown file"):
+            fetch_tutorial_data("missing/file.h5ad")
+
+    def test_missing_pooch_dependency_raises_helpful_import_error(self, monkeypatch):
+        """Role: explain the tutorial extra when pooch is unavailable."""
+        monkeypatch.setitem(__import__("sys").modules, "pooch", None)
+
+        with pytest.raises(ImportError, match="recon\\[tutorials\\]"):
+            fetch_tutorial_data("perturbation_tuto/rna.h5ad")
+
+    def test_existing_file_short_circuits_download(self, tmp_path, monkeypatch):
+        """Role: avoid network work when a cached tutorial file already exists."""
+        existing = tmp_path / "data" / "perturbation_tuto" / "rna.h5ad"
+        existing.parent.mkdir(parents=True)
+        existing.write_bytes(b"cached")
+
+        def fail_retrieve(*args, **kwargs):
+            raise AssertionError("pooch.retrieve should not be called")
+
+        monkeypatch.setattr("pooch.retrieve", fail_retrieve)
+
+        path = fetch_tutorial_data(
+            "perturbation_tuto/rna.h5ad",
+            data_dir=str(tmp_path / "data"),
+            force=False,
+        )
+
+        assert path == str(existing)
+
+    def test_force_download_calls_pooch_with_registry_hash(self, tmp_path, monkeypatch):
+        """Role: verify Zenodo URL, hash, filename, path, and force behavior."""
+        existing = tmp_path / "data" / "perturbation_tuto" / "rna.h5ad"
+        existing.parent.mkdir(parents=True)
+        existing.write_bytes(b"stale")
+        calls = {}
+
+        def fake_retrieve(**kwargs):
+            calls.update(kwargs)
+            return "/tmp/downloaded/rna.h5ad"
+
+        monkeypatch.setattr("pooch.retrieve", fake_retrieve)
+
+        path = fetch_tutorial_data(
+            "perturbation_tuto/rna.h5ad",
+            data_dir=str(tmp_path / "data"),
+            force=True,
+        )
+
+        assert path == "/tmp/downloaded/rna.h5ad"
+        assert calls["url"].endswith("/rna.h5ad")
+        assert calls["known_hash"] == TUTORIAL_DATA_REGISTRY["perturbation_tuto/rna.h5ad"]
+        assert calls["fname"] == "perturbation_tuto/rna.h5ad"
+        assert calls["path"] == str(tmp_path / "data")
+        assert calls["progressbar"] is True
+
+    def test_fetch_all_tutorial_data_downloads_each_registry_entry(self, monkeypatch):
+        """Role: ensure the bulk downloader iterates over the full tutorial registry."""
+        calls = []
+
+        def fake_fetch(filename, data_dir="./data", force=False):
+            calls.append((filename, data_dir, force))
+            return f"/tmp/{filename}"
+
+        monkeypatch.setattr(load_data_module, "fetch_tutorial_data", fake_fetch)
+
+        paths = fetch_all_tutorial_data(data_dir="/tmp/tutorials", force=True)
+
+        assert set(paths) == set(TUTORIAL_DATA_REGISTRY)
+        assert calls == [
+            (filename, "/tmp/tutorials", True)
+            for filename in TUTORIAL_DATA_REGISTRY
+        ]
+
+    def test_fetch_smallest_file(self, tmp_path, monkeypatch):
         """Test downloading the smallest tutorial file."""
         # Define the smallest file to test
         smallest_file = "perturbation_tuto/rna.h5ad"
@@ -174,6 +254,15 @@ class TestFetchTutorialData:
         # Temporary directory for testing
         test_data_dir = tmp_path / "data"
         test_data_dir.mkdir()
+
+        def fake_retrieve(url, known_hash, fname, path, progressbar):
+            downloaded = os.path.join(path, fname)
+            os.makedirs(os.path.dirname(downloaded), exist_ok=True)
+            with open(downloaded, "wb") as handle:
+                handle.write(b"mock h5ad")
+            return downloaded
+
+        monkeypatch.setattr("pooch.retrieve", fake_retrieve)
 
         # Fetch the file
         file_path = fetch_tutorial_data(smallest_file, data_dir=str(test_data_dir))

@@ -1,8 +1,11 @@
 """Tests for recon.explore.Multicell class."""
+import importlib
 import pytest
 import pandas as pd
 import numpy as np
 from recon.explore.recon import Celltype, Multicell
+
+recon_module = importlib.import_module("recon.explore.recon")
 
 
 class TestMulticellConstruction:
@@ -154,6 +157,45 @@ class TestMulticellConstruction:
         assert receptor_bipartite["source"] == "cell_communication"
         assert receptor_bipartite["target"] == "CellA_receptor"
 
+    @pytest.mark.parametrize(
+        "kwargs, message",
+        [
+            ({"celltypes": "CellA"}, "celltypes must be a list or a dictionary"),
+            ({"cell_communication_graph": "not a dataframe"}, "cell_communication_graph must be"),
+            ({"bipartite_grn_cell_communication_directed": "bad"}, "bipartite_grn_cell_communication_directed"),
+            ({"bipartite_cell_communication_receptor_directed": "bad"}, "bipartite_cell_communication_receptor_directed"),
+            ({"bipartite_grn_cell_communication_weighted": "bad"}, "bipartite_grn_cell_communication_weighted"),
+            ({"bipartite_cell_communication_receptor_weighted": "bad"}, "bipartite_cell_communication_receptor_weighted"),
+            ({"cell_communication_graph_directed": "bad"}, "cell_communication_graph_directed"),
+            ({"cell_communication_graph_weighted": "bad"}, "cell_communication_graph_weighted"),
+        ],
+    )
+    def test_invalid_constructor_arguments_raise(
+        self, kwargs, message, simple_grn, simple_receptor_grn, simple_cell_communication
+    ):
+        """Role: validate Multicell constructor rejects malformed inputs clearly."""
+        ct = Celltype(
+            celltype_name="CellA",
+            grn_graph=simple_grn.copy(),
+            receptor_grn_bipartite=simple_receptor_grn.copy(),
+        )
+        params = {
+            "celltypes": [ct],
+            "cell_communication_graph": simple_cell_communication.copy(),
+        }
+        params.update(kwargs)
+
+        with pytest.raises(ValueError, match=message):
+            Multicell(**params)
+
+    def test_invalid_celltype_entry_raises(self, simple_cell_communication):
+        """Role: document malformed list entries before constructor validation improves."""
+        with pytest.raises(TypeError, match="object.*not subscriptable"):
+            Multicell(
+                celltypes=[object()],
+                cell_communication_graph=simple_cell_communication.copy(),
+            )
+
 
 class TestMulticellLambMatrix:
     """Test transition matrix (lamb) for Multicell."""
@@ -276,3 +318,49 @@ class TestMulticellExplore:
         assert result is expected
         assert mc.results is expected
         assert hasattr(mc, "multilayer")
+
+
+class TestMulticellIllustration:
+    """Test plotting delegation methods on Multicell."""
+
+    def test_illustrate_multicell_forwards_lamb_and_display_options(
+        self, simple_grn, simple_receptor_grn, simple_cell_communication, monkeypatch
+    ):
+        """Role: verify Multicell.illustrate_multicell delegates to recon.plot correctly."""
+        captured = {}
+
+        def fake_illustrate_multicell(**kwargs):
+            captured.update(kwargs)
+
+        monkeypatch.setattr(recon_module.recon.plot, "illustrate_multicell", fake_illustrate_multicell)
+
+        ct = Celltype(
+            celltype_name="CellA",
+            grn_graph=simple_grn.copy(),
+            receptor_grn_bipartite=simple_receptor_grn.copy(),
+        )
+        mc = Multicell(
+            celltypes=[ct],
+            cell_communication_graph=simple_cell_communication.copy(),
+        )
+
+        mc.illustrate_multicell(
+            figsize=(4, 3),
+            azim=45,
+            elev=10,
+            display_layer_axis=False,
+            display_self_proba=False,
+            display_layer_names=True,
+            alpha_layers=0.25,
+            cell_communication_layer_name="ccc",
+        )
+
+        assert captured["lamb"] is mc.lamb
+        assert captured["figsize"] == (4, 3)
+        assert captured["azim"] == 45
+        assert captured["elev"] == 10
+        assert captured["display_layer_axis"] is False
+        assert captured["display_self_proba"] is False
+        assert captured["display_layer_names"] is True
+        assert captured["alpha_layers"] == 0.25
+        assert captured["cell_communication_layer_name"] == "ccc"

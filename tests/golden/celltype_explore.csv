@@ -1,0 +1,10 @@
+multiplex,node,layer,score
+Sender_grn,GENE1,gene,0.027616747179390215
+Sender_grn,GENE2,gene,0.0
+Sender_grn,LIG1,gene,0.6894524959705575
+Sender_grn,REC1,gene,0.0
+Sender_grn,REC2,gene,0.023671497582334465
+Sender_grn,TF1,gene,0.25925925926771787
+Sender_grn,TF2,gene,0.0
+Sender_receptor,REC1_receptor,receptor,0.0
+Sender_receptor,REC2_receptor,receptor,0.0

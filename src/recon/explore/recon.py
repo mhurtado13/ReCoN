@@ -704,7 +704,9 @@ def format_multicell_results(
         scores as values.
     """
 
-    cell_type_profiles = multicell_multixrank_results[multicell_multixrank_results['layer'].str.contains(keep_layers)]
+    cell_type_profiles = multicell_multixrank_results[
+        multicell_multixrank_results['layer'].str.contains(keep_layers)
+    ].copy()
     cell_type_profiles[['gene', 'celltype']] = cell_type_profiles['node'].str.split(split, expand=True)
     cell_type_profiles = cell_type_profiles[cell_type_profiles['celltype'].isin(celltypes)]
     cell_type_profiles = cell_type_profiles[['celltype', 'gene', 'score']]
@@ -725,15 +727,21 @@ def set_lambda(
     ccc_to_celltype_proba = None
 ):
 
+    if direction not in {"upstream", "downstream"}:
+        raise ValueError("direction must be either 'upstream' or 'downstream'.")
+    if strategy not in {"intracell", "intercell"}:
+        raise ValueError("strategy must be either 'intracell' or 'intercell'.")
+
     if multicell is None and celltypes is None:
         raise ValueError("Either multicell or celltype should not be None.")
     elif multicell is not None:
         if celltypes is not None:
-            raise warnings.warn("Both multicell and celltypes are provided."+
-                "multicell will be used.")
-        else:
-            multiplexes = list(multicell.multiplexes.keys())
-            celltypes = multicell.celltypes_names
+            warnings.warn(
+                "Both multicell and celltypes are provided."
+                "multicell will be used."
+            )
+        multiplexes = list(multicell.multiplexes.keys())
+        celltypes = multicell.celltypes_names
     else:
         for celltype in celltypes:
             multiplexes.append(f"{celltype}_receptor")
@@ -880,9 +888,9 @@ def multicell_targets(
 
     # loading receptor-gene links
     if isinstance(receptor_grn, str):
-        from recon.loader import load_receptor_target, receptor_target_resources
-        if receptor_grn in receptor_target_resources:
-            receptor_grn = load_receptor_target(receptor_grn)
+        from recon.data.load_data import load_receptor_genes, receptor_gene_resources
+        if receptor_grn in receptor_gene_resources:
+            receptor_grn = load_receptor_genes(receptor_grn)
         else:
             try:
                 receptor_grn = pd.read_csv(receptor_grn, sep=None, engine='python')
@@ -930,6 +938,7 @@ def multicell_targets(
         seeds=starting_nodes,
         verbose=verbose
     )
+    celltype_names = list(celltypes.keys())
 
     print("Computing intracellular contributions and direct effect...")
     # Intracellular direct targets
@@ -939,17 +948,17 @@ def multicell_targets(
         strategy="intracell",
     )
     if ccc_to_celltype_proba is not None:
-        ccc_to_celltype_proba = ccc_to_celltype_proba[celltypes]
-        for celltype in celltypes:
+        ccc_to_celltype_proba = ccc_to_celltype_proba[celltype_names]
+        for celltype in celltype_names:
             generic_multicell.lamb.loc["cell_communication", f"{celltype}_receptor"] = \
                 (1-ccc_proba)*ccc_to_celltype_proba[celltype]/ccc_to_celltype_proba.sum()
     else:
-        for celltype in celltypes:
+        for celltype in celltype_names:
             generic_multicell.lamb.loc["cell_communication", f"{celltype}_receptor"] = \
-                (1-ccc_proba)/len(celltypes)
+                (1-ccc_proba)/len(celltype_names)
 
     generic_multicell.lamb.loc["cell_communication", "cell_communication"] = ccc_proba
-    for celltype in celltypes:
+    for celltype in celltype_names:
         generic_multicell.lamb.loc[f"{celltype}_grn", f"{celltype}_grn"] = grn_proba
         generic_multicell.lamb.loc[f"{celltype}_grn", "cell_communication"] = 1 - grn_proba
     
@@ -966,17 +975,17 @@ def multicell_targets(
         strategy="intercell",
     )
     if ccc_to_celltype_proba is not None:
-        ccc_to_celltype_proba = ccc_to_celltype_proba[celltypes]
-        for celltype in celltypes:
+        ccc_to_celltype_proba = ccc_to_celltype_proba[celltype_names]
+        for celltype in celltype_names:
             generic_multicell.lamb.loc["cell_communication", f"{celltype}_receptor"] = \
                 (1-ccc_proba)*ccc_to_celltype_proba[celltype]/ccc_to_celltype_proba.sum()
     else:
-        for celltype in celltypes:
+        for celltype in celltype_names:
             generic_multicell.lamb.loc["cell_communication", f"{celltype}_receptor"] = \
-                (1-ccc_proba)/len(celltypes)
+                (1-ccc_proba)/len(celltype_names)
     generic_multicell.lamb.loc["cell_communication", "cell_communication"] = ccc_proba
     
-    for celltype in celltypes:
+    for celltype in celltype_names:
         generic_multicell.lamb.loc[f"{celltype}_grn", f"{celltype}_grn"] = grn_proba
         generic_multicell.lamb.loc[f"{celltype}_grn", "cell_communication"] = 1 - grn_proba
 
@@ -1006,22 +1015,22 @@ def multicell_targets(
         return celltype, df  # tuple is easily pickled
 
     # n_jobs: tune to your machine; -1 = all cores
-    njobs = min(njobs, len(celltypes)) if njobs > 0 else -1
+    njobs = min(njobs, len(celltype_names)) if njobs > 0 else -1
     pairs = Parallel(n_jobs=njobs, verbose=10)(
-        delayed(_compute_for_celltype)(ct, keep_layers) for ct in tqdm.tqdm(celltypes)
+        delayed(_compute_for_celltype)(ct, keep_layers) for ct in tqdm.tqdm(celltype_names)
     )
     extracell = dict(pairs)
 
     # Store cell type contributions
     cell_contributions = {}
 
-    for celltype_target in celltypes:
+    for celltype_target in celltype_names:
         cell_contributions[celltype_target] = intracell[
             intracell["multiplex"] == f"{celltype_target}_grn"
         ]["score"].to_frame()# * celltype_to_ccc_proba[celltype_target]
         cell_contributions[celltype_target].columns = [celltype_target+"_direct"]
 
-        for celltype_source in celltypes:
+        for celltype_source in celltype_names:
             if celltype_to_ccc_proba is not None:
                 cell_contributions[celltype_target][celltype_source] = extracell[celltype_source][
                     extracell[celltype_source]["multiplex"] == f"{celltype_target}_grn"
@@ -1098,9 +1107,11 @@ def combine_effects(direct_effect, indirect_effect, alpha=0.8, cell_comm_matrix=
         for celltype in direct_effect:
             if celltype not in cell_comm_matrix.index:
                 raise ValueError(f"Cell type {celltype} not found in cell communication matrix index.")
-            indirect_effect[celltype] = indirect_effect[celltype].dot(cell_comm_matrix.loc[celltype])
-            indirect_effect[celltype] = indirect_effect[celltype]\
-                / indirect_effect[celltype].sum()\
+            direct_effect[celltype] = direct_effect[celltype]/direct_effect[celltype].sum()
+            weighted_indirect = indirect_effect.loc[:, pd.IndexSlice[celltype, :]].droplevel(0, axis=1)\
+                .dot(cell_comm_matrix.loc[celltype])
+            indirect_effect_summed[celltype] = weighted_indirect\
+                / weighted_indirect.sum()\
                 * direct_effect[celltype].sum()
 
     return (1 - alpha) * direct_effect + alpha * pd.DataFrame(indirect_effect_summed)

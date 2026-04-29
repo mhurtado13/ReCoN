@@ -1,6 +1,5 @@
 """Tests for recon.plot cascade plots."""
-import importlib.util
-from pathlib import Path
+import importlib
 import sys
 import types
 import pytest
@@ -11,23 +10,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle, FancyArrowPatch, FancyBboxPatch
 
+from recon.plot import cascade_core
+cascade_plot_module = importlib.import_module("recon.plot.cascade_plot")
 
-_CASCADE_CORE_PATH = Path(__file__).parents[1] / "src" / "recon" / "plot" / "cascade_core.py"
-_PKG_NAME = "cascade_plot_test_pkg"
-_PKG = types.ModuleType(_PKG_NAME)
-_PKG.__path__ = []
-sys.modules[_PKG_NAME] = _PKG
-
-_SPEC = importlib.util.spec_from_file_location(f"{_PKG_NAME}.cascade_core", _CASCADE_CORE_PATH)
-cascade_core = importlib.util.module_from_spec(_SPEC)
-sys.modules[f"{_PKG_NAME}.cascade_core"] = cascade_core
-_SPEC.loader.exec_module(cascade_core)
-
-_CASCADE_PLOT_PATH = Path(__file__).parents[1] / "src" / "recon" / "plot" / "cascade_plot.py"
-_PLOT_SPEC = importlib.util.spec_from_file_location(f"{_PKG_NAME}.cascade_plot", _CASCADE_PLOT_PATH)
-cascade_plot_module = importlib.util.module_from_spec(_PLOT_SPEC)
-sys.modules[f"{_PKG_NAME}.cascade_plot"] = cascade_plot_module
-_PLOT_SPEC.loader.exec_module(cascade_plot_module)
 cascade_plot_fn = cascade_plot_module.cascade_plot
 contrast_cascade_plot_fn = cascade_plot_module.contrast_cascade_plot
 

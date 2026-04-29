@@ -1,8 +1,11 @@
 """Tests for recon.explore.Celltype class."""
+import importlib
 import pytest
 import pandas as pd
 import numpy as np
 from recon.explore.recon import Celltype
+
+recon_module = importlib.import_module("recon.explore.recon")
 
 
 class TestCelltypeConstruction:
@@ -237,6 +240,53 @@ class TestCelltypeMultixrank:
         
         multilayer = ct.Multixrank(self_loops=False, restart_proba=0.7, verbose=False)
         assert multilayer is not None
+
+    def test_multixrank_warns_when_no_seeds(self, simple_grn, simple_receptor_grn):
+        """Role: warn users that empty seeds produce null/NaN scores."""
+        ct = Celltype(
+            celltype_name="TestCell",
+            grn_graph=simple_grn,
+            receptor_grn_bipartite=simple_receptor_grn,
+            seeds=[]
+        )
+
+        with pytest.warns(UserWarning, match="No seeds provided"):
+            multilayer = ct.Multixrank(verbose=False)
+
+        assert multilayer is not None
+
+    def test_multixrank_passes_swapped_layers_network_keys_and_weighted_pr(
+        self, simple_grn, simple_receptor_grn, monkeypatch
+    ):
+        """Role: verify the adapter contract passed from Celltype to HuMMuS."""
+        captured = {}
+
+        class FakeMultixrank:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+                self.multiplexall_node_list2d = [["GENE1", "GENE2", "RECEPTOR1_receptor"]]
+                self.pr = None
+
+        monkeypatch.setattr(recon_module.hummuspy.create_multilayer, "Multixrank", FakeMultixrank)
+
+        ct = Celltype(
+            celltype_name="TestCell",
+            grn_graph=simple_grn,
+            receptor_grn_bipartite=simple_receptor_grn,
+            seeds={"GENE1": 2.0, "GENE2": 1.0},
+        )
+
+        multilayer = ct.Multixrank(self_loops=False, restart_proba=0.4, verbose=False)
+
+        grn_layer = captured["multiplex"]["TestCell_grn"]["layers"][0]
+        assert "network_key" in grn_layer.columns
+        assert grn_layer["network_key"].eq("TestCell_grn").all()
+        assert grn_layer.loc[0, "target"] == simple_grn.loc[0, "source"]
+        assert grn_layer.loc[0, "source"] == simple_grn.loc[0, "target"]
+        assert captured["seeds"] == []
+        assert captured["self_loops"] is False
+        assert captured["restart_proba"] == 0.4
+        assert multilayer.pr.tolist() == pytest.approx([2 / 3, 1 / 3, 0.0])
 
 
 class TestCelltypeExplore:
