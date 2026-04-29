@@ -108,6 +108,36 @@ Tests for visualization functions:
 - `illustrate_multicell` input validation
 - Plot generation with matplotlib integration
 
+### `test_golden_explore.py`
+Golden-output regression tests for tiny end-to-end explore workflows:
+- `Celltype.explore`
+- `Multicell.explore`
+- `multicell_targets`
+
+These tests rerun a deterministic miniature ReCoN example and compare the new
+outputs to CSV snapshots stored in `tests/golden/`. They are meant to catch
+unexpected numerical or formatting regressions in the full explore pipeline,
+not just prevent user-facing exceptions.
+
+Golden files are intentionally versioned because they define the expected
+output contract for these small workflows:
+- `tests/golden/celltype_explore.csv`
+- `tests/golden/multicell_explore.csv`
+- `tests/golden/multicell_targets_direct.csv`
+- `tests/golden/multicell_targets_indirect.csv`
+
+Regenerate them only when the intended algorithm or output contract changes:
+
+```bash
+python scripts/generate_golden_explore_outputs.py
+```
+
+After regenerating, inspect the CSV diff carefully and run:
+
+```bash
+pytest tests/test_golden_explore.py
+```
+
 ### `test_utils.py`
 Tests for utility functions:
 - `split_layer_name` node name parsing
@@ -128,9 +158,12 @@ Tests focus on:
 4. **No mocking**: Tests use actual Celltype/Multicell objects with minimal synthetic data
 
 Tests intentionally avoid:
-- Full RWR execution (requires hummuspy integration testing)
 - Large realistic networks (keep tests fast)
 - External data files (use in-memory fixtures)
+
+The exception is `test_golden_explore.py`, which deliberately runs tiny
+random-walk workflows and checks their exact stored outputs with very tight
+numerical tolerance.
 
 ## Adding New Tests
 
