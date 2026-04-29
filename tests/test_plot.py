@@ -90,3 +90,27 @@ class TestSankeyPaths:
         functions = [name for name, obj in inspect.getmembers(sankey_paths) 
                      if inspect.isfunction(obj)]
         assert len(functions) > 0  # Has some functions
+
+
+class TestPlotPublicApi:
+    """Test the public recon.plot namespace."""
+
+    def test_public_plot_exports_are_user_facing(self):
+        """Role: keep low-level plotting helpers out of recon.plot's public surface."""
+        import recon.plot as plot
+
+        assert plot.__all__ == [
+            "illustrate_multicell",
+            "plot_celltype_comparison",
+            "plot_intracell_sankey",
+            "plot_ligand_sankey",
+            "plot_intercell_sankey",
+            "cascade_plot",
+            "contrast_cascade_plot",
+        ]
+        for name in plot.__all__:
+            assert callable(getattr(plot, name))
+
+        assert not hasattr(plot, "Arrow3D")
+        assert not hasattr(plot, "get_top_genes")
+        assert not hasattr(plot, "plot_3layer_sankey")

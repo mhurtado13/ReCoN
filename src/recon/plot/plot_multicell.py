@@ -9,7 +9,12 @@ from ..utils import split_layer_name
 rcParams['font.family'] = 'sans-serif'
 azim = np.random.randint(-180, 180)
 
-class Arrow3D(FancyArrowPatch):
+__all__ = ["illustrate_multicell"]
+
+
+class _Arrow3D(FancyArrowPatch):
+    """Internal 3D arrow artist used by illustrate_multicell."""
+
     def __init__(self, xs, ys, zs, *args, **kwargs):
         super().__init__((0, 0), (0, 0), *args, **kwargs)
         self._verts3d = xs, ys, zs
@@ -197,7 +202,7 @@ def illustrate_multicell(
                     x2 += 0.2
 
                 ax.add_artist(
-                    Arrow3D(
+                    _Arrow3D(
                         [x1, x2], [y1, y2], [z1, z2],
                         mutation_scale=15, lw=prob * 5,
                         arrowstyle="-|>", color="black", alpha=0.8))
