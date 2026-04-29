@@ -5,7 +5,7 @@
 ## **ReCoN** is a new tool for reconstructing multicellular models.  
 [![codecov](https://codecov.io/gh/cantinilab/ReCoN/graph/badge.svg?token=VT5EEQ3ICY)](https://codecov.io/gh/cantinilab/ReCoN)
 [![Wheels](https://github.com/cantinilab/recon/actions/workflows/wheels.yml/badge.svg)](https://github.com/cantinilab/recon/actions/workflows/wheels.yml)
-[![Unit_Tests](https://github.com/cantinilab/recon/actions/workflows/codecov.yaml/badge.svg)](https://github.com/cantinilab/recon/actions/workflows/codecov.yml)
+[![Unit_Tests](https://github.com/cantinilab/recon/actions/workflows/codecov.yml/badge.svg)](https://github.com/cantinilab/recon/actions/workflows/codecov.yml)
 ![PyPI - Downloads](https://img.shields.io/pypi/dm/recon?style=social&logo=pypi&labelColor=%23007ec6)
 
 
